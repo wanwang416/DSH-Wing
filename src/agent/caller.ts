@@ -12,7 +12,7 @@ import { toSessionEventOut, type SessionEventOut } from "./forwarder.js";
 import { applyPermission } from "./permission.js";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { appendFileSync } from "node:fs";
-import { join as pathJoin } from "node:path";
+import { join as pathJoin, basename } from "node:path";
 import type { PermissionMode } from "../config/defaults.js";
 
 export interface CreateAgentDeps {
@@ -41,6 +41,26 @@ export interface WingAgentHandle {
 }
 
 /** 创建 agent（sessionId = feishu:<chatId>:<random8>:0） */
+/** workspace attach（铁律：session 必须归属工作区，否则 DSH 无法正确管理/恢复） */
+async function attachWorkspace(ctx: any, cwd: string, sessionId: string, logger?: { warn?: (m: string) => void; info?: (m: string) => void }): Promise<void> {
+  try {
+    const workspaces = ctx.get?.("workspaceRegistry");
+    if (workspaces?.create) {
+      const entity = await workspaces.create(cwd, basename(cwd));
+      if (entity?.attachSession) {
+        await entity.attachSession(sessionId);
+        logger?.info?.(`workspace attach: ${sessionId} -> ${cwd}`);
+      } else {
+        logger?.warn?.(`workspace attach skipped: entity 无 attachSession（${cwd}）`);
+      }
+    } else {
+      logger?.warn?.("workspaceRegistry 不可用——session 将显示在未分组");
+    }
+  } catch (err) {
+    logger?.warn?.(`workspace create/attach 失败: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 export async function createAgent(deps: CreateAgentDeps, chatId: string): Promise<WingAgentHandle> {
   const { ctx } = deps;
   const sessionId = makeSessionId(chatId);
@@ -86,6 +106,9 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
   }
   if (!owned?.agent) throw new Error(`agents.create 未返回 agent（chatId=${chatId}）`);
   const agent = owned.agent;
+
+  // ★ workspace attach（session 归属工作区，DSH 才能正确管理/恢复——ALAN 反馈 1/2）
+  await attachWorkspace(ctx, cwd, sessionId, deps.logger);
 
   // ★ 权限应用（默认保守 workspace-write，M1 就做）
   applyPermission(ctx, agent, deps.permissionMode, deps.logger);
@@ -151,6 +174,9 @@ export async function resumeAgent(deps: CreateAgentDeps, sessionId: string): Pro
   });
   if (!owned?.agent) throw new Error(`agents.resume 未返回 agent（sessionId=${sessionId}）`);
   const agent = owned.agent;
+
+  // workspace attach（resume 的 session 同样归属工作区）
+  await attachWorkspace(ctx, deps.workspaceRoot ?? process.cwd(), sessionId, deps.logger);
 
   // 权限应用（resume 的 agent 同样设置）
   applyPermission(ctx, agent, deps.permissionMode, deps.logger);
