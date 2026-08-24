@@ -19,6 +19,13 @@ import { getConfig, type WingConfig } from "./config/defaults.js";
 import { createCredentialStore } from "./host/credentials.js";
 import { buildLarkClient, type WingLarkClient } from "./host/client.js";
 import { createTransport } from "./host/websocket.js";
+import { createStatusStore } from "./host/status.js";
+import { createQuotaGovernor } from "./host/quota.js";
+import { createConnectionSupervisor } from "./host/supervisor.js";
+import { createInboundWal } from "./inbound/wal.js";
+import { createMissedCompensation } from "./inbound/compensation.js";
+import { createBatching } from "./inbound/batching.js";
+import { createGroupPolicy } from "./inbound/group-policy.js";
 import { parseInboundMessage, type ParsedMessage } from "./inbound/parser.js";
 import { createDedupeStore } from "./inbound/dedup.js";
 import { createDispatcher } from "./inbound/dispatcher.js";
@@ -64,9 +71,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
     // 忽略
   }
 
-  // ---------- 状态存储 ----------
+  // ---------- 状态存储（★M0 教训：sessions 实时更新，不重蹈死字段） ----------
   const routeStore = createRouteStore(join(dir, "routes.json"));
   const dedupe = createDedupeStore(join(dir, "dedupe.jsonl"));
+  const status = createStatusStore(join(dir, "status.json"));
 
   // ---------- 凭据 + 客户端 ----------
   const credStore = createCredentialStore(ctx);
@@ -90,6 +98,29 @@ export function apply(ctx: any, rawConfig: unknown): void {
       } catch (err) {
         return { ok: false, retryable: true, error: err instanceof Error ? err.message : String(err) };
       }
+    },
+    onStatsChange: (stats) => {
+      status.refreshCounters({ outboxPending: stats.pending, outboxFailed: stats.failed });
+    },
+    logger,
+  });
+
+  // ---------- 连接监督（M2：probe + 配额熔断 + 自动重连，WS 假死根因解决） ----------
+  const quota = createQuotaGovernor(join(dir, "conn-history.jsonl"), { windowMinutes: 60, limit: 12 });
+  const inboundWal = createInboundWal({ dir: join(dir, "inbound-wal") });
+  const compensation = createMissedCompensation({
+    routes: routeStore,
+    listMessages: async ({ chatId, startTimeMs, endTimeMs }) => {
+      const c = getLarkClient();
+      if (!c?.listMessages) return [];
+      return (await c.listMessages({ container_id_type: "chat", container_id: chatId, start_time: String(startTimeMs), end_time: String(endTimeMs) })) ?? [];
+    },
+    reinject: async (msg) => {
+      // 补偿消息重入处理管线（文本提取失败则跳过——M2 只补有内容的）
+      if (!msg.text) return;
+      await dispatcher.handleEvent("im.message.receive_v1", {
+        message: { message_id: msg.messageId, chat_id: msg.chatId, chat_type: msg.chatType, message_type: "text", content: JSON.stringify({ text: msg.text }) },
+      });
     },
     logger,
   });
@@ -194,6 +225,15 @@ export function apply(ctx: any, rawConfig: unknown): void {
     logger,
     async handleInbound(msg: ParsedMessage) {
       await serialQueue.enqueue(msg.chatId, async () => {
+        // 0) 入站 WAL（崩溃补发：处理前落盘，成功后标记）
+        inboundWal.accept({
+          messageId: msg.messageId,
+          chatId: msg.chatId,
+          chatType: msg.chatType,
+          text: msg.text,
+          senderOpenId: msg.userId,
+        });
+        status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
         // 1) 收到表情 + reaction 目标
         experience.onInbound(msg.chatId, msg.messageId);
         // 2) 获取/创建 agent（resume 优先）
@@ -219,6 +259,37 @@ export function apply(ctx: any, rawConfig: unknown): void {
             updatedAt: Date.now(),
           });
         }
+        // 6) WAL 标记完成 + 补偿登记 + 状态刷新
+        inboundWal.delivered(msg.messageId);
+        compensation.noteDelivered(msg.messageId);
+        status.refreshCounters({
+          inboundPending: inboundWal.pendingCount(),
+          sessions: mapper?.size() ?? 0,
+        });
+      });
+    },
+  });
+
+  // ---------- 群策略 + 合批 ----------
+  const groupPolicy = createGroupPolicy({
+    policy: () => cfg.groupPolicy,
+    keywords: () => (cfg as { groupKeywords?: string[] }).groupKeywords ?? ["lark", "小斯"],
+    botOpenId: () => transport.botOpenId(),
+    logger,
+  });
+  const batching = createBatching({
+    onFlush: (chatId, items) => {
+      // 合批到期：合并文本投给 dispatcher（构造合并事件）
+      const text = batching.merge(items);
+      const last = items[items.length - 1];
+      void dispatcher.handleEvent("im.message.receive_v1", {
+        message: {
+          message_id: last.messageId,
+          chat_id: chatId,
+          chat_type: "p2p",
+          message_type: "text",
+          content: JSON.stringify({ text }),
+        },
       });
     },
   });
@@ -226,11 +297,56 @@ export function apply(ctx: any, rawConfig: unknown): void {
   // ---------- 传输层（WS + 单实例锁 + CLOSE frame） ----------
   const transport = createTransport({
     getClient: getLarkClient,
-    onMessage: (data) => dispatcher.handleEvent("im.message.receive_v1", data),
+    onMessage: async (data) => {
+      // 群策略 + 合批（M2）
+      const msg = parseInboundMessage(data as any, transport.botOpenId());
+      if (!msg) {
+        await dispatcher.handleEvent("im.message.receive_v1", data);
+        return;
+      }
+      if (msg.chatType === "group" && !groupPolicy.shouldProcess(msg)) {
+        return; // 群策略忽略
+      }
+      if (batching.add(msg.chatId, { messageId: msg.messageId, text: msg.text })) {
+        return; // 已合并（窗口到期统一 flush）
+      }
+      // 批次超限：本消息单独处理
+      await dispatcher.handleEvent("im.message.receive_v1", data);
+    },
     onEvent: (event, data) => {
-      // M1：card.action.trigger 留 M3
-      void event;
-      void data;
+      // M2 全事件订阅（表情/撤回/bot进退群/P2P/已读；card.action.trigger 留 M3）
+      const d = data as any;
+      const chatIdOf = (): string | undefined => d?.chat_id ?? d?.chat?.chat_id ?? d?.operator?.operator_id?.open_id;
+      switch (event) {
+        case "im.chat.member.bot.added_v1": {
+          const chatId = chatIdOf();
+          if (chatId) {
+            void outbox.enqueue({
+              dedupeKey: `${chatId}:welcome:${Date.now()}`,
+              chatId,
+              kind: "text",
+              payload: { kind: "text", text: "👋 我是 dsh-wing，随时待命！" },
+            });
+          }
+          break;
+        }
+        case "im.chat.access_event.bot_p2p_chat_entered_v1": {
+          const openId = d?.operator?.operator_id?.open_id;
+          if (openId) {
+            void outbox.enqueue({
+              dedupeKey: `p2p:${openId}:welcome:${Date.now()}`,
+              chatId: openId,
+              kind: "text",
+              payload: { kind: "text", text: "👋 你好！我是 dsh-wing，直接说需求就行。" },
+            });
+          }
+          break;
+        }
+        default:
+          // reaction/recalled/read/bot_deleted：日志级响应（M2 验收 15）
+          logger.info?.(`事件 ${event} 收到（${JSON.stringify(d)?.slice(0, 120) ?? ""}）`);
+          break;
+      }
     },
     lockDir: join(dir, "locks"),
     logger,
@@ -272,6 +388,26 @@ export function apply(ctx: any, rawConfig: unknown): void {
   let lifecycleStarted = false;
   let startBlocker: string | undefined;
 
+  // 连接监督器（M2：probe + 配额熔断 + 自动重连，WS 假死根因解决）
+  const supervisor = createConnectionSupervisor({
+    transport,
+    quota,
+    status,
+    cfg: {
+      probeIntervalMs: 30_000,
+      probeTimeoutMs: 8_000,
+      probeFailThreshold: 2,
+      maxReconnectAttempts: 5,
+    },
+    logger,
+    onStateChange: (state) => {
+      // 连接恢复 → 丢消息补偿（补拉断连窗口消息）
+      if (state === "connected") {
+        void compensation.onRecovered().catch(() => void 0);
+      }
+    },
+  });
+
   const startBridge = async (): Promise<void> => {
     if (lifecycleStarted) return;
     try {
@@ -294,11 +430,33 @@ export function apply(ctx: any, rawConfig: unknown): void {
       await outbox.start();
       // 4) 轮次监督
       turnSupervisor.start();
-      // 5) 传输启动
-      await transport.start();
+      // 5) 入站 WAL 重放（崩溃补发）
+      inboundWal.prune();
+      let replayed = 0;
+      for (const rec of inboundWal.pendingReplays()) {
+        if (!inboundWal.markReplay(rec.messageId)) continue;
+        try {
+          await dispatcher.handleEvent("im.message.receive_v1", {
+            message: {
+              message_id: rec.messageId,
+              chat_id: rec.chatId,
+              chat_type: rec.chatType,
+              message_type: "text",
+              content: JSON.stringify({ text: rec.text }),
+            },
+          });
+          replayed += 1;
+        } catch (err) {
+          logger.warn?.(`WAL 重放失败 ${rec.messageId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (replayed > 0) logger.info?.(`入站 WAL 重放 ${replayed} 条`);
+      status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
+      // 6) 连接监督启动（含 WS 连接 + 探活 + 自动重连）
+      await supervisor.start();
       lifecycleStarted = true;
       startBlocker = undefined;
-      logger.info?.("bridge started (M1)");
+      logger.info?.("bridge started (M2)");
     } catch (err) {
       startBlocker = err instanceof Error ? err.message : String(err);
       logger.error?.(`bridge 启动失败: ${startBlocker}`);
@@ -308,7 +466,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const stopBridge = async (): Promise<void> => {
     if (!lifecycleStarted) return;
     turnSupervisor.stop();
-    await transport.stop(); // 先发 WS CLOSE frame（铁律 6）
+    await supervisor.stop(); // 内部先 transport.stop（CLOSE frame）
     await outbox.stop();
     await mapper?.disposeAll();
     lifecycleStarted = false;
@@ -317,37 +475,17 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
   ctx.effect(() => {
     void startBridge();
-    // ★ 基础探活（M2 连接自愈的雏形）：30s 真实 API 探活，连续 2 次失败重启 WS
-    let probeFails = 0;
-    const probeTimer = setInterval(() => {
-      void (async () => {
-        if (!lifecycleStarted) return;
-        const ok = await transport.probe();
-        if (ok) {
-          probeFails = 0;
-        } else {
-          probeFails += 1;
-          logger.warn?.(`WS 探活失败 ${probeFails}/2`);
-          if (probeFails >= 2) {
-            probeFails = 0;
-            logger.warn?.("WS 疑似假死，重启传输连接…");
-            await transport.stop();
-            await transport.start();
-          }
-        }
-      })();
-    }, 30_000);
-    probeTimer.unref?.();
     // 空闲清理：每 10 分钟 dispose 空闲 30 分钟的 agent
     const sweep = setInterval(() => {
       void (async () => {
         const n = (await mapper?.空闲清理(30 * 60_000)) ?? 0;
         if (n > 0) logger.info?.(`清理 ${n} 个空闲 agent`);
+        // ★ 实时刷新 sessions（M0 死字段教训）
+        status.refreshCounters({ sessions: mapper?.size() ?? 0 });
       })();
     }, 10 * 60_000);
     sweep.unref?.();
     return async () => {
-      clearInterval(probeTimer);
       clearInterval(sweep);
       await stopBridge();
     };

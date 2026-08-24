@@ -16,6 +16,8 @@ export interface ParsedMessage {
   /** 原始文本（未剥离） */
   rawText: string;
   mentions: string[];
+  /** 回复消息的父消息 id（reply 群策略用） */
+  parentId?: string;
   timestamp: number;
 }
 
@@ -50,7 +52,33 @@ export function stripMentions(text: string, mentions: string[], botOpenId?: stri
   return cur;
 }
 
-/** 解析飞书消息事件 → ParsedMessage；非 text 或缺关键字段返回 undefined */
+/** 非 text 消息 → 给 agent 的摘要文本（M2 全类型） */
+function summarizeNonText(msgType: string, contentRaw: string): string | undefined {
+  switch (msgType) {
+    case "image":
+      return "[用户发送了图片]";
+    case "file":
+      return "[用户发送了文件]";
+    case "audio":
+      return "[用户发送了语音]";
+    case "video":
+      return "[用户发送了视频]";
+    case "merge_forward":
+      return "[用户转发了多条消息]";
+    case "share_chat":
+      return "[用户分享了群聊]";
+    case "sticker":
+      return "[用户发送了表情包]";
+    case "post": {
+      const parsed = pickText(contentRaw);
+      return parsed && parsed.trim() ? parsed : "[用户发送了富文本消息]";
+    }
+    default:
+      return undefined; // 未知类型跳过
+  }
+}
+
+/** 解析飞书消息事件 → ParsedMessage；无法解析返回 undefined（M2 全类型） */
 export function parseInboundMessage(raw: any, botOpenId?: string): ParsedMessage | undefined {
   const msg = raw.message ?? raw;
   const messageId: string | undefined = msg.message_id ?? raw.message_id;
@@ -61,12 +89,9 @@ export function parseInboundMessage(raw: any, botOpenId?: string): ParsedMessage
   const senderOpenId: string = raw.sender?.sender_id?.open_id ?? raw.operator?.operator_id?.open_id ?? "unknown";
   const msgType: string | undefined = msg.message_type ?? raw.message_type;
 
-  // M1 只处理 text；其他类型跳过（M2 全类型）
-  if (msgType && msgType !== "text") return undefined;
-
   const content: string = msg.content ?? raw.content ?? "";
-  const rawText = pickText(content);
-  if (!rawText.trim()) return undefined;
+  const rawText = msgType && msgType !== "text" ? summarizeNonText(msgType, content) : pickText(content);
+  if (!rawText || !rawText.trim()) return undefined;
 
   const mentions: string[] = (msg.mentions ?? []).map((m: any) => m.id?.open_id ?? m.id?.user_id ?? m.name ?? "").filter(Boolean);
 
@@ -78,6 +103,7 @@ export function parseInboundMessage(raw: any, botOpenId?: string): ParsedMessage
     text: stripMentions(rawText, mentions, botOpenId),
     rawText,
     mentions,
+    ...(msg.parent_id ?? raw.parent_id ? { parentId: msg.parent_id ?? raw.parent_id } : {}),
     timestamp: Number(msg.create_time ?? raw.create_time ?? Date.now()),
   };
 }
