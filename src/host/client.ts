@@ -20,6 +20,8 @@ export interface WingLarkClient {
   /** 更新已发送的卡片消息（StreamingCard 单卡流式用） */
   updateMessage(params: { message_id: string; content: string }): Promise<unknown>;
   addReaction(params: { message_id: string; emoji_type: string }): Promise<unknown>;
+  /** 拉取会话消息（丢消息补偿用，M2） */
+  listMessages?(params: Record<string, unknown>): Promise<Array<{ messageId: string; timestampMs: number }>>;
   /** WS 连接状态（SDK getConnectionStatus 透出，诊断用） */
   connectionStatus?(): unknown;
   /** WS 是否已就绪（SDK onReady 触发后才 true） */
@@ -169,6 +171,16 @@ export function buildLarkClient(opts: {
         path: { message_id: params.message_id },
         data: { reaction_type: { emoji_type: params.emoji_type } } as never,
       });
+    },
+    /** 拉取会话消息（丢消息补偿用，M2） */
+    async listMessages(params) {
+      const res = (await sdkClient.im.message.list({
+        params: { ...params, page_size: 50 } as never,
+      })) as any;
+      return (res?.items ?? res?.data?.items ?? []).map((i: any) => ({
+        messageId: i.message_id,
+        timestampMs: Number(i.create_time ?? 0),
+      }));
     },
     connectionStatus() {
       return (wsClient as unknown as { getConnectionStatus?: () => unknown }).getConnectionStatus?.();

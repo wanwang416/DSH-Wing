@@ -31,6 +31,8 @@ export interface OutboxDeps {
   maxRetries?: number;
   retryDelayMs?: number;
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
+  /** 统计变化回调（状态面板用） */
+  onStatsChange?(stats: { pending: number; failed: number }): void;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -186,7 +188,15 @@ export function createOutbox(deps: OutboxDeps) {
       }
     } finally {
       pumpRunning = false;
+      deps.onStatsChange?.({ pending: pendingCount(), failed: failedCount() });
     }
+  }
+
+  function pendingCount(): number {
+    return [...envelopes.values()].filter((e) => e.status === "pending" || e.status === "failed").length;
+  }
+  function failedCount(): number {
+    return [...envelopes.values()].filter((e) => e.status === "failed").length;
   }
 
   return {
@@ -200,8 +210,8 @@ export function createOutbox(deps: OutboxDeps) {
     async stop(): Promise<void> {
       stopped = true;
     },
-    pendingCount: () => [...envelopes.values()].filter((e) => e.status === "pending" || e.status === "failed").length,
-    failedCount: () => [...envelopes.values()].filter((e) => e.status === "failed").length,
+    pendingCount,
+    failedCount,
   };
 }
 
