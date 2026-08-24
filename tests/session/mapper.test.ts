@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { sessionKey, makeSessionId, createSessionMapper } from "../../src/session/mapper.js";
+import { sessionKey, makeSessionId, bumpGeneration, resetRunNonce, createSessionMapper } from "../../src/session/mapper.js";
 
 describe("sessionKey（铁律 2：前缀隔离）", () => {
   it("格式为 feishu:<chatId>，绝不复用 Web GUI 会话", () => {
@@ -7,11 +7,25 @@ describe("sessionKey（铁律 2：前缀隔离）", () => {
     expect(sessionKey("ou_xyz").startsWith("feishu:")).toBe(true);
   });
 
-  it("makeSessionId 生成 <feishu:chatId>:<random8>:<gen> 格式", () => {
-    const id = makeSessionId("oc_abc123");
-    expect(id).toMatch(/^feishu:oc_abc123:[0-9a-f]{8}:0$/);
-    const gen1 = makeSessionId("oc_abc123", 3);
-    expect(gen1).toMatch(/^feishu:oc_abc123:[0-9a-f]{8}:3$/);
+  it("makeSessionId 稳定：同 chat 同 nonce 生成相同 id（resume 落点一致）", () => {
+    resetRunNonce();
+    const a = makeSessionId("oc_abc123");
+    const b = makeSessionId("oc_abc123");
+    expect(a).toBe(b); // ★ 同一 chat 稳定复用（M1 random8 教训的反面）
+    expect(a).toMatch(/^feishu:oc_abc123:[0-9a-f]{12}:0$/);
+    // 不同 chat 不同 id
+    expect(makeSessionId("oc_other")).not.toBe(a);
+  });
+
+  it("bumpGeneration：dispose 后重建 generation 递增；resetRunNonce：nonce 重置", () => {
+    resetRunNonce();
+    const id0 = makeSessionId("oc_x");
+    bumpGeneration("oc_x");
+    const id1 = makeSessionId("oc_x");
+    expect(id1).toMatch(/^feishu:oc_x:[0-9a-f]{12}:1$/);
+    expect(id1).not.toBe(id0);
+    resetRunNonce();
+    expect(makeSessionId("oc_x")).toMatch(/^feishu:oc_x:[0-9a-f]{12}:1$/); // generation 保留，nonce 变
   });
 });
 

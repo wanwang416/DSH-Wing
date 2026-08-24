@@ -31,6 +31,7 @@ import { createExperience } from "./agent/experience.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
 import { createSender } from "./outbound/sender.js";
 import { createOutbox } from "./outbound/outbox.js";
+import { StreamingCard } from "./outbound/streaming-card.js";
 import { createReactionManager } from "./interactive/reaction.js";
 
 export const name = "dsh-wing";
@@ -107,7 +108,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     logger,
   });
 
-  // ---------- 体验契约（流式/插话/工具可见/表情） ----------
+  // ---------- 体验契约（StreamingCard 单卡流式/插话/停止/表情） ----------
   const experience = createExperience({
     sendText: (chatId, text) =>
       outbox.enqueue({
@@ -116,6 +117,19 @@ export function apply(ctx: any, rawConfig: unknown): void {
         kind: "text",
         payload: { kind: "text", text },
       }) as unknown as Promise<void>,
+    // ★ StreamingCard 工厂：单卡流式（思考/工具/回答聚合一张卡），降级回退 outbox text
+    createStreamCard: (chatId) =>
+      new StreamingCard(chatId, {
+        sender,
+        logger,
+        onFallback: (cid, text) =>
+          outbox.enqueue({
+            dedupeKey: `${cid}:fallback:${text.length}:${Date.now()}`,
+            chatId: cid,
+            kind: "text",
+            payload: { kind: "text", text },
+          }) as unknown as Promise<void>,
+      }),
     addReaction: (messageId, emoji) =>
       reactionManager.react(messageId, emoji) as unknown as Promise<void>,
     turnSupervisor,

@@ -17,6 +17,8 @@ export interface WingLarkClient {
   };
   getBotInfo(): Promise<{ open_id?: string; name?: string }>;
   sendMessage(params: { receive_id_type: "chat_id" | "open_id"; params: Record<string, unknown> }): Promise<unknown>;
+  /** 更新已发送的卡片消息（StreamingCard 单卡流式用） */
+  updateMessage(params: { message_id: string; content: string }): Promise<unknown>;
   addReaction(params: { message_id: string; emoji_type: string }): Promise<unknown>;
   /** WS 连接状态（SDK getConnectionStatus 透出，诊断用） */
   connectionStatus?(): unknown;
@@ -153,6 +155,13 @@ export function buildLarkClient(opts: {
       return sdkClient.im.message.create({
         params: { receive_id_type: params.receive_id_type },
         data: params.params as never,
+      });
+    },
+    async updateMessage(params) {
+      // StreamingCard 单卡流式：更新已发送的卡片消息
+      return sdkClient.im.message.update({
+        path: { message_id: params.message_id },
+        data: { content: params.content } as never,
       });
     },
     async addReaction(params) {
