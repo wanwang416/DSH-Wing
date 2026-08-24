@@ -71,6 +71,12 @@ export function createSender(deps: SenderDeps) {
       if (!c?.addReaction) throw new Error("lark 客户端未就绪");
       return withRetry(() => c.addReaction({ message_id: messageId, emoji_type: emojiType }));
     },
+    /** 更新已发送的卡片消息（StreamingCard 单卡流式） */
+    async updateCard(messageId: string, cardJson: string): Promise<unknown> {
+      const c = client();
+      if (!c?.updateMessage) throw new Error("lark 客户端未就绪");
+      return withRetry(() => c.updateMessage({ message_id: messageId, content: cardJson }));
+    },
   };
 }
 

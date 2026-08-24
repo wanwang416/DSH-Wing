@@ -7,7 +7,7 @@
  * - agent.ctx.on("session/event", ...) 订阅 6 种事件
  */
 
-import { makeSessionId } from "../session/mapper.js";
+import { makeSessionId, resetRunNonce } from "../session/mapper.js";
 import { toSessionEventOut, type SessionEventOut } from "./forwarder.js";
 import { applyPermission } from "./permission.js";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
@@ -63,7 +63,7 @@ async function attachWorkspace(ctx: any, cwd: string, sessionId: string, logger?
 
 export async function createAgent(deps: CreateAgentDeps, chatId: string): Promise<WingAgentHandle> {
   const { ctx } = deps;
-  const sessionId = makeSessionId(chatId);
+  let sessionId = makeSessionId(chatId);
   const cwd = deps.workspaceRoot ?? process.cwd();
 
   // 当前 GUI 模型选择（DSH agent 必须有 provider/model，否则 turn 失败）
@@ -81,7 +81,15 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
         deps.logger?.warn?.(`installModelSelection 失败: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    // M1：不注册 agent 级专属工具（M2 加 feishu_send_local_file）
+    // ★ preset mount（对齐既有桥接实现-118：agent 配置/工具集装载，M1 缺失项）
+    try {
+      const presets = ctx.get?.("agentPresets");
+      if (presets?.mount) await presets.mount(agentCtx, deps.agentPreset);
+      else deps.logger?.warn?.("agentPresets 服务不可用——preset mount 跳过");
+    } catch (err) {
+      deps.logger?.warn?.(`preset mount 失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // M2：agent 级专属工具（feishu_send_local_file）后续加
   };
 
   let owned: any;
@@ -93,13 +101,26 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
       setup,
     });
   } catch (err) {
-    // session id 冲突（已存在持久化日志）→ 改为 resume
+    // session id 冲突（已存在持久化日志）→ 改为 resume（对齐既有桥接实现-283）
     if (err instanceof Error && /already exists|already has a persisted log/i.test(err.message)) {
-      owned = await ctx.agents.resume({
-        resumeSessionId: sessionId,
-        ...(sel ? { agentOptions: sel } : {}),
-        setup,
-      });
+      try {
+        owned = await ctx.agents.resume({
+          resumeSessionId: sessionId,
+          ...(sel ? { agentOptions: sel } : {}),
+          setup,
+        });
+      } catch (resumeErr) {
+        // resume 也失败 → mint fresh（重置 runNonce，对齐）
+        deps.logger?.warn?.(`session id 冲突且 resume 失败——mint fresh: ${resumeErr instanceof Error ? resumeErr.message : String(resumeErr)}`);
+        resetRunNonce();
+        sessionId = makeSessionId(chatId);
+        owned = await ctx.agents.create({
+          sessionId,
+          meta: { cwd, agentPreset: deps.agentPreset },
+          ...(sel ? { agentOptions: sel } : {}),
+          setup,
+        });
+      }
     } else {
       throw err;
     }
@@ -165,7 +186,13 @@ export async function resumeAgent(deps: CreateAgentDeps, sessionId: string): Pro
         deps.logger?.warn?.(`installModelSelection 失败: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    // M1 无专属工具
+    // ★ preset mount（对齐既有桥接实现-118）
+    try {
+      const presets = ctx.get?.("agentPresets");
+      if (presets?.mount) await presets.mount(agentCtx, deps.agentPreset);
+    } catch (err) {
+      deps.logger?.warn?.(`preset mount 失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
   const owned = await ctx.agents.resume({
     resumeSessionId: sessionId,
