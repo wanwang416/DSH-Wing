@@ -16,6 +16,8 @@ export interface TransportLike {
   isConnected(): boolean;
   wsReady(): boolean;
   probe(): Promise<boolean>;
+  /** 最近收到 WS 事件的时间（0=从未收到；连接活性检测用） */
+  lastEventAt?(): number;
 }
 
 export interface SupervisorCfg {
@@ -44,6 +46,8 @@ export function createConnectionSupervisor(deps: SupervisorDeps) {
   let stopped = false;
   let probeFailStreak = 0;
   let reconnectAttempts = 0;
+  /** 最近一次连接成功的时间（连接活性检测用） */
+  let lastConnectedAt = 0;
 
   const setState = (s: string, detail?: string) => {
     state = s;
@@ -79,6 +83,7 @@ export function createConnectionSupervisor(deps: SupervisorDeps) {
     if (deps.transport.isConnected()) {
       reconnectAttempts = 0;
       probeFailStreak = 0;
+      lastConnectedAt = now();
       setState("connected");
     } else {
       reconnectAttempts += 1;
@@ -113,6 +118,14 @@ export function createConnectionSupervisor(deps: SupervisorDeps) {
     deps.status.update({ lastProbeAt: now(), lastProbeOk: ok, wsReady: deps.transport.wsReady() });
     if (ok) {
       probeFailStreak = 0;
+      // ★ 连接活性检测：probe OK 但长时间无 WS 事件（假死窗口）→ 主动重连
+      //   SDK watchdog 有 120s ping + 60s 超时；这里加速恢复（2 分钟无事件即重连）
+      const lastEvent = deps.transport.lastEventAt?.() ?? now();
+      if (lastConnectedAt > 0 && now() - lastEvent > 120_000) {
+        setState("degraded", "长时间无 WS 事件，疑似连接假死，主动重连");
+        await ensureConnected();
+        return;
+      }
       if (!deps.transport.isConnected()) {
         reconnectAttempts = 0;
         await ensureConnected();
