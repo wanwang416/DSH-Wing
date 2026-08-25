@@ -13,6 +13,17 @@
 import type { WingConfig } from "../config/defaults.js";
 import { StreamingCard } from "../outbound/streaming-card.js";
 
+/** 诊断日志：落盘 本地目录/wing/steer-diag.log（steer 真机排障用，问题定位后移除） */
+function diagLog(msg: string): void {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require("node:fs");
+    fs.appendFileSync("本地目录/wing/steer-diag.log", `${new Date().toISOString()} ${msg}\n`);
+  } catch {
+    // 忽略
+  }
+}
+
 export interface TurnSupervisorLike {
   arm(key: string): void;
   disarm(key: string): void;
@@ -21,6 +32,8 @@ export interface TurnSupervisorLike {
 export interface ExperienceDeps {
   /** 普通消息发送（卡片降级用） */
   sendText(chatId: string, text: string): Promise<void>;
+  /** 发送交互式提问卡片（ask-user-question 用） */
+  sendAskUserQuestionCard(chatId: string, questions: any[]): Promise<void>;
   /** StreamingCard 工厂（index.ts 组装时提供 sender/onFallback） */
   createStreamCard(chatId: string): StreamingCard;
   addReaction(messageId: string, emoji: string): Promise<void>;
@@ -63,8 +76,9 @@ export function createExperience(deps: ExperienceDeps) {
       s.hasOutput = false;
       // ★ 单卡流式：本轮一张卡片，思考/工具/回答全进卡
       s.card = deps.createStreamCard(chatId);
-      void s.card.addThinking("").catch(() => void 0); // 预创建卡片（💭 思考中…）
-      deps.turnSupervisor.arm(chatId);
+    /** turn/start：预创建卡片（"💭 思考中…"），但不立即 patch → 第一次 addThinking 再 patch，减少一次推送 */
+    s.card.addThinking("💭 思考中…").catch(() => void 0);
+    deps.turnSupervisor.arm(chatId);
     },
 
     /** assistant/chunk：思考流式 → 卡片内持续更新（不刷屏） */
@@ -74,7 +88,10 @@ export function createExperience(deps: ExperienceDeps) {
       void s.card?.addThinking(text).catch(() => void 0);
     },
 
-    /** assistant/message：最终回答 → 卡片落地（一个框，含思考+工具+回答） */
+    /** assistant/message：最终回答 → 卡片落地（一个框，含思考+工具+回答）
+     * 按单卡流式约定：全程一张卡片增量更新，最终回答在卡片内，不单独发重复文本
+     * （ALAN 反馈：我上次改错了，发了两次同样内容，现在改回 成熟桥接实现 正确逻辑）
+     */
     async onAssistantMessage(chatId: string, text: string): Promise<void> {
       const s = st(chatId);
       s.hasOutput = true;
@@ -86,7 +103,7 @@ export function createExperience(deps: ExperienceDeps) {
         try {
           await deps.sendText(chatId, text);
         } catch (err) {
-          deps.logger?.warn?.(`最终回复发送失败: ${String(err)}`);
+          deps.logger?.warn?.(`最终回复发送失败: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
       const mid = reactionTarget.get(chatId);
@@ -105,6 +122,14 @@ export function createExperience(deps: ExperienceDeps) {
     async onToolResult(chatId: string, name: string, error: unknown): Promise<void> {
       const s = st(chatId);
       await s.card?.addTool(name, undefined, error).catch(() => void 0);
+    },
+
+    /** 处理 ask-user-question 工具调用：发送带选项按钮的交互式卡片给用户，用户点击后选择会注入 agent */
+    onAskUserQuestion(chatId: string, questions: any[]) {
+      // 直接调用 deps 发送交互式提问卡片 → 按 DSH 原生逻辑
+      deps.sendAskUserQuestionCard(chatId, questions).catch(err => {
+        deps.logger?.warn?.(`sendAskUserQuestionCard 失败: ${err instanceof Error ? err.message : String(err)}`);
+      });
     },
 
     /** turn/end：无输出警告 + 失败表情 */
@@ -145,6 +170,7 @@ export function createExperience(deps: ExperienceDeps) {
         t === "停止" ||
         t === "stop" ||
         t === "/stop" ||
+        t === "/stop".toLowerCase() ||
         t.includes("停下来") ||
         t.includes("停一下") ||
         t.includes("别说了") ||
@@ -153,12 +179,20 @@ export function createExperience(deps: ExperienceDeps) {
         t === "算了";
       if (isStop) {
         agent.cancel({ kind: "user" });
+        diagLog(`[steer-diag] STOP 分支: text="${text.slice(0, 30)}" status=${agent.status}`);
         return "stopped";
       }
       if (agent.status === "running") {
-        agent.steer(message); // ★ 温和打断
+        // ★ 温和打断
+        try {
+          agent.steer(message);
+          diagLog(`[steer-diag] STEER 分支: text="${text.slice(0, 30)}" status=${agent.status} steer() 调用成功`);
+        } catch (err) {
+          diagLog(`[steer-diag] STEER 分支但 steer() 抛异常: ${err instanceof Error ? err.message : String(err)}`);
+        }
         return "steered";
       }
+      diagLog(`[steer-diag] QUEUE 分支(followup): text="${text.slice(0, 30)}" status=${agent.status}`);
       agent.followup(message);
       return "queued";
     },

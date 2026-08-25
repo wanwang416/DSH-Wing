@@ -65,6 +65,51 @@ export function createSender(deps: SenderDeps) {
         }),
       );
     },
+    /** 发送 ask-user-question 交互式提问卡片（带选项按钮，和 DSH 原生格式对齐 */
+    async sendAskUserQuestionCard(chatId: string, questions: any[]): Promise<unknown> {
+      const c = client();
+      if (!c?.sendMessage) throw new Error("lark 客户端未就绪");
+      // 构造飞书交互式卡片，按 DSH ask-user-question 格式
+      const elements = questions.map(q => ({
+        "tag": "markdown",
+        "content": `### ${q.header}\n\n${q.description || ""}`,
+      }));
+      elements.push({
+        "tag": "markdown",
+        "content": "点击下方选项:",
+      });
+      const actions = questions.flatMap(q => q.options.map((opt: any, idx: number) => ({
+        "tag": "button",
+        "text": {
+          "content": opt.label,
+          "type": "default",
+        },
+        "type": "action",
+        "name": `answer:${q.id}:${idx}`,
+        "value": JSON.stringify({ questionId: q.id, optionId: idx, label: opt.label }),
+      })));
+      const card = {
+        "schema": "2.0",
+        "header": {
+          "title": {
+            "content": "请选择偏好",
+            "template": "blue",
+          },
+        },
+        "body": elements,
+        "actions": actions,
+      };
+      return withRetry(() =>
+        c.sendMessage({
+          receive_id_type: receiveIdType(chatId),
+          params: {
+            receive_id: chatId,
+            msg_type: "interactive",
+            content: JSON.stringify(card),
+          },
+        }),
+      );
+    },
     /** 添加表情回应 */
     async addReaction(messageId: string, emojiType: string): Promise<unknown> {
       const c = client();

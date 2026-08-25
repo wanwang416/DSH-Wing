@@ -22,10 +22,10 @@ export interface CardToolEntry {
 export function buildCardMarkdown(thinking: string, tools: CardToolEntry[], answer: string): string {
   const sb: string[] = [];
   if (thinking) {
-    sb.push("💭 **思考**\n\n" + thinking + "\n\n---\n\n");
+    sb.push("💭 **Thinking**\n\n" + thinking + "\n\n---\n\n");
   }
   for (const t of tools) {
-    sb.push(`🔧 **工具 #${t.index}**: \`${t.name}\``);
+    sb.push(`🔧 **Tool #${t.index}**: \`${t.name}\``);
     if (t.input) sb.push("\n" + t.input);
     sb.push("\n\n");
   }
@@ -57,8 +57,6 @@ export interface StreamingCardDeps {
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
   /** 降级回调：卡片不可用时回退普通消息 */
   onFallback?(chatId: string, text: string): Promise<void>;
-  /** 更新节流（ms） */
-  patchIntervalMs?: number;
 }
 
 export class StreamingCard {
@@ -69,6 +67,7 @@ export class StreamingCard {
   private tools: CardToolEntry[] = [];
   private answer = "";
   private toolCounter = 0;
+  private lastPatchLength = 0;  // 上次更新时的内容长度
   private lastPatchAt = 0;
   private failed = false;
 
@@ -85,23 +84,44 @@ export class StreamingCard {
     if (this.messageId) return true;
     try {
       const res = (await this.deps.sender.sendCard(this.chatId, JSON.parse(buildCardJson(this.markdown() || "💭 思考中…")))) as any;
-      this.messageId = res?.data?.message_id ?? res?.message_id ?? res?.data?.item?.message_id;
-      if (!this.messageId) throw new Error("sendCard 未返回 message_id");
+      // 兼容多种返回格式：
+      // - { data: { message_id } } (SDK 标准)
+      // - { message_id } (直接返回)
+      // - { data: { item: { message_id } } } (某些 API 变体)
+      this.messageId = 
+        res?.data?.message_id ?? 
+        res?.message_id ?? 
+        res?.data?.item?.message_id;
+      if (!this.messageId) {
+        // 调试：把整个响应打出来，方便定位
+        console.warn("[dsh-wing] sendCard response didn't have message_id. Full response:", JSON.stringify(res, null, 2));
+        throw new Error(`sendCard 未返回 message_id. Response: ${JSON.stringify(res).slice(0, 200)}`);
+      }
+      this.lastPatchLength = this.markdown().length;
       this.lastPatchAt = Date.now();
       return true;
     } catch (err) {
       this.failed = true;
       this.deps.logger?.warn?.(`StreamingCard 创建失败，降级普通消息: ${err instanceof Error ? err.message : String(err)}`);
+      // 额外把错误写到文件方便诊断
+      try {
+        const fs = require("fs");
+        fs.appendFileSync("本地目录/wing/streaming-card-error.log", `${new Date().toISOString()} ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+      } catch {}
       return false;
     }
   }
 
-  /** 更新卡片内容（节流） */
-  async patch(): Promise<void> {
-    if (this.failed) return;
+  /** 更新卡片：混合节流 → 时间间隔 ≥ 3000ms **OR** 内容变化 ≥ 50 字符 → 满足一个就更新，避免飞书限流 */
+  private async shouldPatch(): Promise<void> {
     if (!(await this.ensureCreated())) return;
+    const currentLen = this.markdown().length;
+    const lenDiff = Math.abs(currentLen - this.lastPatchLength);
     const now = Date.now();
-    if (now - this.lastPatchAt < (this.deps.patchIntervalMs ?? 800)) return;
+    const timeDiff = now - this.lastPatchAt;
+    // 满足一个就更新
+    if (lenDiff < 50 && timeDiff < 3000) return;
+    this.lastPatchLength = currentLen;
     this.lastPatchAt = now;
     try {
       await this.deps.sender.updateCard(this.messageId!, buildCardJson(this.markdown()));
@@ -115,7 +135,7 @@ export class StreamingCard {
   async addThinking(delta: string): Promise<void> {
     if (this.failed) return;
     this.thinking += delta;
-    await this.patch();
+    await this.shouldPatch();
   }
 
   /** 工具调用记录（tool/call + tool/result） */
@@ -127,7 +147,7 @@ export class StreamingCard {
       name: error ? `${name} ❌` : name,
       input,
     });
-    await this.patch();
+    await this.shouldPatch();
   }
 
   /** 最终回答（assistant/message）：完整卡片落地 */
@@ -142,6 +162,7 @@ export class StreamingCard {
     this.answer = answer;
     if (!(await this.ensureCreated())) return;
     try {
+      // 最终更新：包含完整的 思考+工具+回答
       await this.deps.sender.updateCard(this.messageId!, buildCardJson(this.markdown()));
     } catch (err) {
       this.failed = true;
