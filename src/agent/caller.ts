@@ -81,15 +81,15 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
         deps.logger?.warn?.(`installModelSelection 失败: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    // ★ preset mount（对齐既有桥接实现-118：agent 配置/工具集装载，M1 缺失项）
+    // ★ preset mount（对齐既有桥接实现-118）
     try {
       const presets = ctx.get?.("agentPresets");
       if (presets?.mount) await presets.mount(agentCtx, deps.agentPreset);
-      else deps.logger?.warn?.("agentPresets 服务不可用——preset mount 跳过");
+      else deps.logger?.warn?.("agentPresets 服务不可用--preset mount 跳过");
     } catch (err) {
       deps.logger?.warn?.(`preset mount 失败: ${err instanceof Error ? err.message : String(err)}`);
     }
-    // M2：agent 级专属工具（feishu_send_local_file）后续加
+    // M3：userQuestions provider 注册（ask_user_question 工具通过飞书卡片提问）
   };
 
   let owned: any;

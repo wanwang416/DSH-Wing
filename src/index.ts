@@ -148,6 +148,9 @@ export function apply(ctx: any, rawConfig: unknown): void {
         kind: "text",
         payload: { kind: "text", text },
       }) as unknown as Promise<void>,
+    // ★ 发送 ask-user-question 交互式提问卡片
+    sendAskUserQuestionCard: (chatId, questions) =>
+      sender.sendAskUserQuestionCard(chatId, questions) as unknown as Promise<void>,
     // ★ StreamingCard 工厂：单卡流式（思考/工具/回答聚合一张卡），降级回退 outbox text
     createStreamCard: (chatId) =>
       new StreamingCard(chatId, {
@@ -168,7 +171,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     logger,
   });
 
-  // ---------- 事件转发（6 种事件 → 体验） ----------
+  // ---------- 事件转发（7 种事件 → 体验） ----------
   const forwarder = createForwarder({
     onTurnStart: (chatId) => experience.onTurnStart(chatId),
     onChunk: (chatId, text) => experience.onChunk(chatId, text),
@@ -176,6 +179,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     onTurnEnd: (chatId, reason) => void experience.onTurnEnd(chatId, reason),
     onToolCall: (chatId, name) => void experience.onToolCall(chatId, name),
     onToolResult: (chatId, name, error) => void experience.onToolResult(chatId, name, error),
+    onAskUserQuestion: (chatId, questions) => experience.onAskUserQuestion(chatId, questions),
   });
 
   // ---------- session 映射（createAgent 工厂：resume 优先，权限应用） ----------
@@ -218,14 +222,31 @@ export function apply(ctx: any, rawConfig: unknown): void {
   });
 
   // ---------- 入站分发 ----------
+  // ★ 按 DSH 原生 GUI 逻辑：
+  // - 任何入站消息立刻进入 handleInbound，不排队，让 handleUserMessage 立刻决策
+  // - 只有新建轮次（queued）才进串行队列，保证单 chat 一次只跑一个轮次
+  // - steered/stopped 完全不排队，立刻调用 agent.steer/agent.cancel，打断立即生效
+  // 这和 DSH GUI 网页端的插话处理完全一致，体验对齐
   const serialQueue = createSerialQueue();
   const dispatcher = createDispatcher({
     dedupe,
     botOpenId: () => transport.botOpenId(),
     logger,
     async handleInbound(msg: ParsedMessage) {
-      await serialQueue.enqueue(msg.chatId, async () => {
-        // 0) 入站 WAL（崩溃补发：处理前落盘，成功后标记）
+      // 0) 立即获取/创建 agent（不排队）
+      const agent = await mapper!.getOrCreateAgent(msg.chatId);
+      // 1) 立即构造用户消息（不排队）
+      const message = createUserMessage({
+        content: [{ type: "text", text: msg.text }],
+        source: { kind: "user" },
+      });
+      // 2) 立即调用 handleUserMessage → steer/stop 立即生效（和 DSH GUI 完全一致）
+      const action = experience.handleUserMessage(msg.chatId, agent, msg.text, message);
+      logger.info?.(`chat=${msg.chatId} 消息 ${msg.messageId} → ${action}`);
+
+      // 3) 分支处理（按 DSH 原生决策）：
+      // a) steered/stopped → 立即做完 WAL 和路由，不排队，直接返回 → 打断立即生效
+      if (action === "steered" || action === "stopped") {
         inboundWal.accept({
           messageId: msg.messageId,
           chatId: msg.chatId,
@@ -234,19 +255,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
           senderOpenId: msg.userId,
         });
         status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
-        // 1) 收到表情 + reaction 目标
         experience.onInbound(msg.chatId, msg.messageId);
-        // 2) 获取/创建 agent（resume 优先）
-        const agent = await mapper!.getOrCreateAgent(msg.chatId);
-        // 3) 构造用户消息
-        const message = createUserMessage({
-          content: [{ type: "text", text: msg.text }],
-          source: { kind: "user" },
-        });
-        // 4) 插话/停止/排队（★体验契约）
-        const action = experience.handleUserMessage(msg.chatId, agent, msg.text, message);
-        logger.info?.(`chat=${msg.chatId} 消息 ${msg.messageId} → ${action}`);
-        // 5) 路由 touch
         const key = sessionKey(msg.chatId);
         const route = routeStore.get(key);
         if (route) routeStore.touch(key, msg.messageId);
@@ -259,7 +268,38 @@ export function apply(ctx: any, rawConfig: unknown): void {
             updatedAt: Date.now(),
           });
         }
-        // 6) WAL 标记完成 + 补偿登记 + 状态刷新
+        inboundWal.delivered(msg.messageId);
+        compensation.noteDelivered(msg.messageId);
+        status.refreshCounters({
+          inboundPending: inboundWal.pendingCount(),
+          sessions: mapper?.size() ?? 0,
+        });
+        return;
+      }
+
+      // b) queued → 只有新建轮次才进串行队列，保证单 chat 一次只跑一个轮次（和 DSH 原生一致）
+      await serialQueue.enqueue(msg.chatId, async () => {
+        inboundWal.accept({
+          messageId: msg.messageId,
+          chatId: msg.chatId,
+          chatType: msg.chatType,
+          text: msg.text,
+          senderOpenId: msg.userId,
+        });
+        status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
+        experience.onInbound(msg.chatId, msg.messageId);
+        const key = sessionKey(msg.chatId);
+        const route = routeStore.get(key);
+        if (route) routeStore.touch(key, msg.messageId);
+        else {
+          routeStore.upsert({
+            sessionKey: key,
+            chatId: msg.chatId,
+            chatType: msg.chatType,
+            sessionId: agent.sessionId,
+            updatedAt: Date.now(),
+          });
+        }
         inboundWal.delivered(msg.messageId);
         compensation.noteDelivered(msg.messageId);
         status.refreshCounters({
@@ -307,14 +347,16 @@ export function apply(ctx: any, rawConfig: unknown): void {
       if (msg.chatType === "group" && !groupPolicy.shouldProcess(msg)) {
         return; // 群策略忽略
       }
-      if (batching.add(msg.chatId, { messageId: msg.messageId, text: msg.text })) {
-        return; // 已合并（窗口到期统一 flush）
+      // ★ 关键修复：p2p 不做合批 → 插话能立即到达 handleInbound → steer 立即生效
+      // （合批只为群聊设计：群聊里用户连续发多条短消息应合并；p2p 插话不能被吞）
+      if (msg.chatType === "group" && batching.add(msg.chatId, { messageId: msg.messageId, text: msg.text })) {
+        return; // 群聊已合并（窗口到期统一 flush）
       }
-      // 批次超限：本消息单独处理
+      // p2p 或群聊超限：立即处理
       await dispatcher.handleEvent("im.message.receive_v1", data);
     },
     onEvent: (event, data) => {
-      // M2 全事件订阅（表情/撤回/bot进退群/P2P/已读；card.action.trigger 留 M3）
+      // M2 订阅：表情/撤回/bot进退群/P2P/已读/card.action.trigger（ask-user-question 需要）
       const d = data as any;
       const chatIdOf = (): string | undefined => d?.chat_id ?? d?.chat?.chat_id ?? d?.operator?.operator_id?.open_id;
       switch (event) {
@@ -341,6 +383,37 @@ export function apply(ctx: any, rawConfig: unknown): void {
             });
           }
           break;
+        }
+        case "card.action.trigger": {
+          // 处理 ask-user-question 选项点击 → 把用户选择注入 agent
+          try {
+            const chatId = d.chat?.chat_id;
+            if (!chatId) break;
+            // 提取 name 和 value → name 格式: answer:questionId:optionIdx
+            const actionName = d.action?.name;
+            if (!actionName || !actionName.startsWith("answer:")) break;
+            const value = d.action?.value ? JSON.parse(d.action.value) : null;
+            if (!value?.label) break;
+            // 用户选择了: value.label → 作为文本 steer 注入 agent
+            // 1) 获取 agent
+            (async () => {
+              const agent = await mapper!.getOrCreateAgent(chatId);
+              // 2) 构造消息
+              const message = createUserMessage({
+                content: [{ type: "text", text: value.label }],
+                source: { kind: "user" },
+              });
+              // 3) steer 注入（agent 正在运行 → next-step 边界消费）
+              experience.handleUserMessage(chatId, agent, value.label, message);
+              logger.info?.(`card.action.trigger chat=${chatId} question=${value.questionId} option=${value.optionId} label=${value.label} → steer 注入成功`);
+            })().catch(err => {
+              logger?.warn?.(`card.action.trigger 处理失败: ${err instanceof Error ? err.message : String(err)}`);
+            });
+            break;
+          } catch (err) {
+            logger?.warn?.(`card.action.trigger 解析失败: ${err instanceof Error ? err.message : String(err)}`);
+            break;
+          }
         }
         default:
           // reaction/recalled/read/bot_deleted：日志级响应（M2 验收 15）
@@ -394,9 +467,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
     quota,
     status,
     cfg: {
+      // 增大 fail threshold 给飞书足够时间建立第一次连接（根因：飞书新连接分配事件需要几十秒，原阈值 2 次 2 分钟内重连永远收不到）
       probeIntervalMs: 30_000,
       probeTimeoutMs: 8_000,
-      probeFailThreshold: 2,
+      probeFailThreshold: 4, // 从 2 → 4 → 4×30s = 2 分钟，给飞书足够时间
       maxReconnectAttempts: 5,
     },
     logger,

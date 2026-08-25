@@ -10,7 +10,8 @@ export type SessionEventOut =
   | { type: "assistant/message"; text: string }
   | { type: "turn/end"; reason: string }
   | { type: "tool/call"; name: string }
-  | { type: "tool/result"; name: string; error?: unknown };
+  | { type: "tool/result"; name: string; error?: unknown }
+  | { type: "ask-user-question"; questions: any[] };
 
 function textOf(blocks: any[] | undefined): string {
   return (blocks ?? [])
@@ -41,6 +42,12 @@ export function toSessionEventOut(ev: any): SessionEventOut | undefined {
         name: ev.data?.message?.content?.[0]?.type ?? "?",
         error: ev.data?.error,
       };
+    case "ask-user-question":
+      // 提问工具 → 透传 questions
+      return {
+        type: "ask-user-question",
+        questions: ev.data?.questions,
+      };
     default:
       return undefined;
   }
@@ -53,6 +60,7 @@ export interface ForwarderDeps {
   onTurnEnd(chatId: string, reason: string): void;
   onToolCall(chatId: string, name: string): void;
   onToolResult(chatId: string, name: string, error: unknown): void;
+  onAskUserQuestion(chatId: string, questions: any[]): void;
 }
 
 export function createForwarder(deps: ForwarderDeps) {
@@ -76,6 +84,9 @@ export function createForwarder(deps: ForwarderDeps) {
           break;
         case "tool/result":
           deps.onToolResult(chatId, event.name, event.error);
+          break;
+        case "ask-user-question":
+          deps.onAskUserQuestion(chatId, event.questions);
           break;
       }
     },
