@@ -128,8 +128,11 @@ export function createTransport(deps: TransportDeps) {
   let wsReadyFlag = false;
   let botOpenId: string | undefined;
   let lock: { release(): void } | undefined;
+  /** 最近收到 WS 事件的时间（连接活性检测：probe OK 但长时间无事件 = 假死） */
+  let lastEventAt = 0;
 
   async function handleEvent(event: string, data: unknown): Promise<void> {
+    lastEventAt = Date.now();
     deps.onEvent?.(event, data);
     if (event !== EVENT_MESSAGE) return;
     try {
@@ -198,6 +201,8 @@ export function createTransport(deps: TransportDeps) {
     wsReady: () => wsReadyFlag,
     isConnected: () => started && wsReadyFlag,
     botOpenId: () => botOpenId,
+    /** 最近收到 WS 事件的时间（0=从未收到） */
+    lastEventAt: () => lastEventAt,
     /** 探活：真实 API 调用检测连接假死（M2 完整 supervisor 的雏形） */
     async probe(): Promise<boolean> {
       try {
