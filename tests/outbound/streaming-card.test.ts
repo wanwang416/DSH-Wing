@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import { StreamingCard, buildRichCardJson } from "../../src/outbound/streaming-card.js";
+import { StreamingCard, buildRichCardJson, STREAM_INTERVAL_MS } from "../../src/outbound/streaming-card.js";
 import { contextStep, toolCallStep } from "../../src/outbound/tool-step.js";
 
 function makeCard(opts: { cardkit?: boolean; createFails?: boolean } = {}) {
@@ -91,13 +91,16 @@ describe("StreamingCard 分行 + 状态（C1）", () => {
   });
 
   it("addThinking → Reasoning panel（💭）", async () => {
+    // 防抖用真实 setTimeout，测试直接等 STREAM_INTERVAL_MS + 100ms
     const { card, updateCard } = makeCard({ cardkit: true });
     await card.addThinking("让我想想" + LONG);
-    const parsed = JSON.parse(updateCard.mock.calls.at(-1)![1]) as any;
+    // 等防抖执行完
+    await new Promise(resolve => setTimeout(resolve, STREAM_INTERVAL_MS + 100));
+    const parsed = JSON.parse((updateCard.mock.calls.at(-1)![0]) as any) as any;
     const panels = parsed.body.elements.filter((e: any) => e.tag === "collapsible_panel");
     expect(panels[0].header.title.content).toContain("Reasoning");
     expect(panels[0].elements[0].text.content).toContain("💭");
-  });
+  }, 7000);
 });
 
 describe("CardKit 流式打字机 + 三级降级链（B1/B2）", () => {

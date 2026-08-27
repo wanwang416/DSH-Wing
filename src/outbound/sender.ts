@@ -24,7 +24,14 @@ export function createSender(deps: SenderDeps) {
       } catch (err) {
         lastErr = err;
         if (i < maxRetries - 1) {
-          await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+          // 对频率限制错误（230020）加倍退避，避免雪崩式重试
+          let delay = 500 * (i + 1);
+          // 检查是否是飞书频率限制错误（code 230020）
+          const errStr = err instanceof Error ? err.message : String(err ?? '');
+          if (errStr.includes('230020') || errStr.includes('frequency limit') || errStr.includes('Update the single messages too frequently')) {
+            delay = 1000 * (i + 2); // 第一次 2000ms，第二次 3000ms
+          }
+          await new Promise((r) => setTimeout(r, delay));
         }
       }
     }
