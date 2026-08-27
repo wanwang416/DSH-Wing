@@ -9,7 +9,7 @@
  *       streaming.enabled 默认 true / permissionMode 默认 workspace-write
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
@@ -58,10 +58,19 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const dir = stateDir();
   mkdirSync(dir, { recursive: true });
   const cfg: WingConfig = getConfig(ctx, rawConfig);
+  // ★ 日志落盘：所有 dsh-wing 日志同时写到 wing/dsh-wing.log，方便不依赖终端窗口排查
+  const logFile = join(dir, "dsh-wing.log");
+  const fileLog = (level: string, m: string) => {
+    try {
+      appendFileSync(logFile, `[${new Date().toISOString()}] [${level}] ${m}\n`);
+    } catch {
+      // 忽略写文件失败
+    }
+  };
   const logger = {
-    info: (m: string) => ctx.logger?.info?.(`[dsh-wing] ${m}`),
-    warn: (m: string) => ctx.logger?.warn?.(`[dsh-wing] ${m}`),
-    error: (m: string) => ctx.logger?.error?.(`[dsh-wing] ${m}`),
+    info: (m: string) => { ctx.logger?.info?.(`[dsh-wing] ${m}`); fileLog("info", m); },
+    warn: (m: string) => { ctx.logger?.warn?.(`[dsh-wing] ${m}`); fileLog("warn", m); },
+    error: (m: string) => { ctx.logger?.error?.(`[dsh-wing] ${m}`); fileLog("error", m); },
   };
 
   // M0 遗留：加载 marker（证明插件被 DSH 加载；非 DSH 环境忽略）
