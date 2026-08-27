@@ -1,0 +1,292 @@
+/**
+ * ask-user-question 飞书桥 — M3 任务 1（🔴 阻塞项）
+ *
+ * 机制：monkey-patch `ctx.userQuestions.ask`（不占用 provider 名额，绕开 host-apiproxy
+ * 已注册的 Web provider，避免 DUPLICATE_PROVIDER）。sessionId 前缀 `feishu:` 的 agent
+ * 提问走飞书交互式卡片；其余转发原 ask（Web UI 提问不受影响）。
+ *
+ * 参考成熟桥接实现：
+ * - sendAskQuestionPrompt (core/engine.go:11546)：单选按钮 / 多选编号列表
+ * - resolveAskQuestionAnswer (core/engine.go:3481)：数字 / 选项文字解析
+ * - onCardAction askq 处理 (platform/feishu/feishu.go:817)：✅ 已选择卡片更新
+ * - renderCardMap (platform/feishu/card.go:91)：飞书卡片结构（header.title 用 plain_text）
+ */
+
+export interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface PendingQuestion {
+  id: string;
+  question: string;
+  detail?: string;
+  header?: string;
+  options?: QuestionOption[];
+  multiSelect?: boolean;
+}
+
+export interface UserQuestionBridgeDeps {
+  /** 发送交互式卡片（schema 2.0）→ 返回 SDK 响应 */
+  sendCard(chatId: string, card: unknown): Promise<unknown>;
+  /** 更新已发送卡片（✅ 已选择） */
+  updateCard(messageId: string, cardJson: string): Promise<unknown>;
+  /** 发送普通文本（降级 / 无选项自由回答） */
+  sendText(chatId: string, text: string): Promise<unknown>;
+  /** 从 sendCard 响应提取 message_id */
+  messageIdOf(res: unknown): string | undefined;
+  /** 提问超时（默认 30_000ms） */
+  timeoutMs?: number;
+  logger?: { warn?: (m: string) => void; info?: (m: string) => void };
+}
+
+/** DSH 错误码对齐（dsh-user-questions/lib/index.js: ASK_ABORTED / ASK_MISSING_AGENT） */
+export class UserQuestionBridgeError extends Error {
+  code: string;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "UserQuestionBridgeError";
+    this.code = code;
+  }
+}
+
+export const ASK_ABORTED = "ASK_ABORTED";
+export const ASK_MISSING_AGENT = "ASK_MISSING_AGENT";
+
+interface PendingEntry {
+  chatId: string;
+  question: PendingQuestion;
+  resolve: (ans: { id: string; selected: string[]; custom?: string }) => void;
+  reject: (err: Error) => void;
+  cardMessageId?: string;
+  mode: "card" | "text";
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+/** 提取 sendCard 响应中的 message_id（兼容 SDK 多种返回） */
+export function messageIdOfRes(res: unknown): string | undefined {
+  if (res && typeof res === "object") {
+    const r = res as { data?: { message_id?: unknown; item?: { message_id?: unknown } }; message_id?: unknown };
+    return (r?.data?.message_id ?? r?.message_id ?? r?.data?.item?.message_id) as string | undefined;
+  }
+  return undefined;
+}
+
+/** 构建提问卡片（schema 2.0：单选按钮 / 多选编号列表） */
+export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
+  const opts = q.options ?? [];
+  const body: Record<string, unknown>[] = [];
+  body.push({ tag: "markdown", content: `**${q.question}**${q.detail ? `\n\n${q.detail}` : ""}` });
+
+  let actions: Record<string, unknown>[] = [];
+  if (q.multiSelect) {
+    // 多选：编号列表，用户文本回复数字（对齐基底 sendAskQuestionPrompt 多选分支）
+    body.push({
+      tag: "markdown",
+      content:
+        opts.length > 0
+          ? opts.map((o, i) => `${i + 1}. **${o.label}**${o.description ? " — " + o.description : ""}`).join("\n")
+          : "（无预设选项，直接回复你的答案）",
+    });
+    body.push({ tag: "note", elements: [{ tag: "plain_text", content: "请回复数字，多个用逗号分隔（如 1,3）" }] });
+  } else {
+    // 单选：每选项一个按钮（对齐基底 sendAskQuestionPrompt 单选分支 / onCardAction）
+    actions = opts.map((o, i) => ({
+      tag: "button",
+      type: "default",
+      text: { tag: "plain_text", content: o.label },
+      name: `answer:${q.id}:${i}`,
+      value: JSON.stringify({ questionId: q.id, optionId: i, label: o.label }),
+    }));
+    if (actions.length === 0) {
+      body.push({ tag: "note", elements: [{ tag: "plain_text", content: "请直接回复你的答案" }] });
+    }
+  }
+
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content: `❓ ${q.header ?? "请选择"}` }, template: "blue" },
+    body: { elements: body },
+    ...(actions.length > 0 ? { actions: { elements: actions } } : {}),
+  };
+}
+
+/** 构建"✅ 已选择"卡片（点击后替换原卡片，对齐基底 onCardAction 返回卡片） */
+export function buildAnsweredCard(q: PendingQuestion, answerText: string): Record<string, unknown> {
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content: `✅ ${answerText}` }, template: "green" },
+    body: {
+      elements: [{ tag: "markdown", content: `**${q.question}**\n\n→ **${answerText}**` }],
+    },
+  };
+}
+
+/** 降级文本提问（卡片发送失败时用） */
+export function buildQuestionText(q: PendingQuestion): string {
+  const opts = q.options ?? [];
+  const sb = [`❓ ${q.question}`];
+  if (q.detail) sb.push("", q.detail);
+  if (opts.length > 0) {
+    sb.push("", opts.map((o, i) => `${i + 1}. ${o.label}`).join("\n"), "", q.multiSelect ? "请回复数字，多个用逗号分隔（如 1,3）" : "请回复数字或选项文字");
+  } else {
+    sb.push("", "请直接回复你的答案");
+  }
+  return sb.join("\n");
+}
+
+/** 解析文本回复为选项（对齐基底 resolveAskQuestionAnswer：数字 / 逗号分隔 / 选项文字 / 自由文本） */
+export function resolveTextAnswer(q: PendingQuestion, rawInput: string): { selected: string[]; custom?: string } {
+  const input = rawInput.trim();
+  const opts = q.options ?? [];
+  if (opts.length === 0) {
+    // 无预设选项 → 自由文本回答
+    return input ? { selected: [], custom: input } : { selected: [] };
+  }
+  // 选项文字直接匹配
+  const exact = opts.find((o) => o.label === input);
+  if (exact) return { selected: [exact.label] };
+  // 数字 / 逗号分隔（多选）
+  const parts = input.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean);
+  const labels: string[] = [];
+  let allNumeric = true;
+  for (const p of parts) {
+    const idx = Number(p);
+    if (!Number.isInteger(idx) || idx < 1 || idx > opts.length) {
+      allNumeric = false;
+      break;
+    }
+    labels.push(opts[idx - 1].label);
+  }
+  if (allNumeric && labels.length > 0) return { selected: labels };
+  return { selected: [] };
+}
+
+export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
+  const pending = new Map<string, PendingEntry>();
+  const timeoutMs = deps.timeoutMs ?? 30_000;
+
+  function timeout(chatId: string, entry: PendingEntry): void {
+    if (pending.get(chatId) !== entry) return;
+    pending.delete(chatId);
+    entry.reject(new UserQuestionBridgeError("ask_user_question was aborted before the user answered", ASK_ABORTED));
+  }
+
+  function resolveEntry(chatId: string, entry: PendingEntry, selected: string[], custom?: string): boolean {
+    if (pending.get(chatId) !== entry) return false;
+    if (entry.timer) clearTimeout(entry.timer);
+    pending.delete(chatId);
+    entry.resolve({ id: entry.question.id, selected, ...(custom !== undefined ? { custom } : {}) });
+    return true;
+  }
+
+  async function trySendCard(chatId: string, entry: PendingEntry): Promise<void> {
+    try {
+      const res = await deps.sendCard(chatId, buildQuestionCard(entry.question));
+      entry.cardMessageId = deps.messageIdOf(res);
+      entry.mode = "card";
+      deps.logger?.info?.(`提问卡片已发送 chat=${chatId} q=${entry.question.id} mode=card`);
+    } catch (err) {
+      entry.mode = "text";
+      deps.logger?.warn?.(`提问卡片发送失败，降级文本: ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        await deps.sendText(chatId, buildQuestionText(entry.question));
+      } catch (err2) {
+        deps.logger?.warn?.(`提问文本降级也失败（将超时兜底）: ${err2 instanceof Error ? err2.message : String(err2)}`);
+      }
+    }
+  }
+
+  function askOne(
+    chatId: string,
+    request: { signal?: AbortSignal },
+    question: PendingQuestion,
+  ): Promise<{ id: string; selected: string[]; custom?: string }> {
+    return new Promise((resolve, reject) => {
+      if (pending.has(chatId)) {
+        reject(new UserQuestionBridgeError("已有待答问题（chat busy）", "DUPLICATE_QUESTION"));
+        return;
+      }
+      const entry: PendingEntry = { chatId, question, resolve, reject, mode: "card" };
+      pending.set(chatId, entry);
+      entry.timer = setTimeout(() => timeout(chatId, entry), timeoutMs);
+      request.signal?.addEventListener("abort", () => timeout(chatId, entry), { once: true });
+      void trySendCard(chatId, entry);
+    });
+  }
+
+  return {
+    /** 注册：monkey-patch ctx.userQuestions.ask（飞书优先，Web 转发原 provider）。返回恢复函数 */
+    patchAsk(ctx: { userQuestions?: { ask: (...args: any[]) => Promise<unknown> } } | undefined): () => void {
+      const uq = ctx?.userQuestions;
+      if (!uq || typeof uq.ask !== "function") {
+        deps.logger?.warn?.("ctx.userQuestions 不可用——ask-user-question 未接管");
+        return () => {};
+      }
+      const originalAsk = uq.ask.bind(uq);
+      uq.ask = (async (request: any) => {
+        const sessionId = request?.agent?.id;
+        const isFeishu = typeof sessionId === "string" && sessionId.startsWith("feishu:");
+        if (!isFeishu) return originalAsk(request);
+        const chatId = sessionId.slice("feishu:".length).split(":")[0];
+        if (!chatId) throw new UserQuestionBridgeError("feishu session 解析失败", ASK_MISSING_AGENT);
+        const answers: { id: string; selected: string[]; custom?: string }[] = [];
+        for (const question of request?.questions ?? []) {
+          answers.push(await askOne(chatId, request, question));
+        }
+        return { answers };
+      }) as typeof uq.ask;
+      deps.logger?.info?.("userQuestions.ask 已接管（飞书优先，Web 转发原 provider）");
+      return () => {
+        uq.ask = originalAsk;
+      };
+    },
+
+    /**
+     * 卡片按钮回调（answer: 前缀）→ resolve 待答问题。
+     * @returns true=已消费（index.ts 不再 steer 注入）
+     */
+    onCardAction(chatId: string, actionName: string): boolean {
+      if (!actionName?.startsWith("answer:")) return false;
+      const entry = pending.get(chatId);
+      if (!entry) return false;
+      const parts = actionName.split(":");
+      if (parts.length < 3) return false;
+      const optIdx = Number(parts[2]);
+      const opt = entry.question.options?.[optIdx];
+      if (!opt) return false;
+      if (!resolveEntry(chatId, entry, [opt.label])) return true;
+      if (entry.cardMessageId) {
+        deps.updateCard(entry.cardMessageId, JSON.stringify(buildAnsweredCard(entry.question, opt.label))).catch(() => void 0);
+      }
+      deps.logger?.info?.(`提问已回答 chat=${chatId} q=${entry.question.id} → ${opt.label}`);
+      return true;
+    },
+
+    /**
+     * 文本回复（多选 / 降级 / 自由文本）→ resolve 待答问题。
+     * @returns true=已消费（index.ts 不再 steer 注入）
+     */
+    onTextInbound(chatId: string, text: string): boolean {
+      const entry = pending.get(chatId);
+      if (!entry) return false;
+      const ans = resolveTextAnswer(entry.question, text);
+      if (ans.selected.length === 0 && ans.custom === undefined) {
+        // 解析不出 → 提示重试，消费该消息避免污染 agent
+        deps.sendText(chatId, "⚠️ 没认出你的选项，请回复数字（如 1，多选用 1,3）或选项文字").catch(() => void 0);
+        return true;
+      }
+      if (!resolveEntry(chatId, entry, ans.selected, ans.custom)) return true;
+      const shown = ans.custom ?? ans.selected.join(", ");
+      if (entry.cardMessageId) {
+        deps.updateCard(entry.cardMessageId, JSON.stringify(buildAnsweredCard(entry.question, shown))).catch(() => void 0);
+      }
+      deps.logger?.info?.(`提问文本回答 chat=${chatId} q=${entry.question.id} → ${shown}`);
+      return true;
+    },
+  };
+}
+
+export type UserQuestionBridge = ReturnType<typeof createUserQuestionBridge>;

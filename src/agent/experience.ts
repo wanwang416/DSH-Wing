@@ -32,8 +32,6 @@ export interface TurnSupervisorLike {
 export interface ExperienceDeps {
   /** 普通消息发送（卡片降级用） */
   sendText(chatId: string, text: string): Promise<void>;
-  /** 发送交互式提问卡片（ask-user-question 用） */
-  sendAskUserQuestionCard(chatId: string, questions: any[]): Promise<void>;
   /** StreamingCard 工厂（index.ts 组装时提供 sender/onFallback） */
   createStreamCard(chatId: string): StreamingCard;
   addReaction(messageId: string, emoji: string): Promise<void>;
@@ -81,10 +79,16 @@ export function createExperience(deps: ExperienceDeps) {
     deps.turnSupervisor.arm(chatId);
     },
 
-    /** assistant/chunk：思考流式 → 卡片内持续更新（不刷屏） */
+    /** assistant/chunk（text-delta）：回答流式 → main_text 打字机（不刷屏） */
     onChunk(chatId: string, text: string): void {
       const s = st(chatId);
       s.hasOutput = true;
+      void s.card?.addText(text).catch(() => void 0);
+    },
+
+    /** assistant/thinking（reasoning-delta）：思考流式 → Reasoning 面板累积 */
+    onThinking(chatId: string, text: string): void {
+      const s = st(chatId);
       void s.card?.addThinking(text).catch(() => void 0);
     },
 
@@ -112,24 +116,22 @@ export function createExperience(deps: ExperienceDeps) {
       }
     },
 
-    /** tool/call：进卡片（🔧 Tool #N，可见性恢复，不再静默也不刷屏） */
-    async onToolCall(chatId: string, name: string): Promise<void> {
+    /** tool/call：Tools 面板新增一行（🔧 <工具名>，带参数摘要） */
+    async onToolCall(chatId: string, name: string, input?: string): Promise<void> {
       const s = st(chatId);
-      await s.card?.addTool(name).catch(() => void 0);
+      await s.card?.addTool(name, input).catch(() => void 0);
     },
 
-    /** tool/result：进卡片（带失败标记） */
+    /** tool/result：更新对应工具行状态（✅/❌ + 结果摘要） */
     async onToolResult(chatId: string, name: string, error: unknown): Promise<void> {
       const s = st(chatId);
-      await s.card?.addTool(name, undefined, error).catch(() => void 0);
+      await s.card?.setToolResult(name, error).catch(() => void 0);
     },
 
-    /** 处理 ask-user-question 工具调用：发送带选项按钮的交互式卡片给用户，用户点击后选择会注入 agent */
-    onAskUserQuestion(chatId: string, questions: any[]) {
-      // 直接调用 deps 发送交互式提问卡片 → 按 DSH 原生逻辑
-      deps.sendAskUserQuestionCard(chatId, questions).catch(err => {
-        deps.logger?.warn?.(`sendAskUserQuestionCard 失败: ${err instanceof Error ? err.message : String(err)}`);
-      });
+    /** user/message（上下文注入）：Tools 面板新增 📥 行 */
+    async onContext(chatId: string, text?: string): Promise<void> {
+      const s = st(chatId);
+      await s.card?.addContext(text).catch(() => void 0);
     },
 
     /** turn/end：无输出警告 + 失败表情 */
