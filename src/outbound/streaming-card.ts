@@ -186,6 +186,10 @@ export class StreamingCard {
   private lastStreamText = "";
   private failed = false;
 
+  // ★ M3 修复：addThinking 防抖合并：避免 reasoning 每小段都 PATCH，短时间多 chunk 合并
+  private thinkingTimeout: NodeJS.Timeout | null = null;
+  private pendingThinking = false;
+
   constructor(chatId: string, deps: StreamingCardDeps) {
     this.chatId = chatId;
     this.deps = deps;
@@ -351,7 +355,13 @@ export class StreamingCard {
     } else {
       this.steps.push({ kind: "thinking", name: "Thinking", summary: truncateText(delta, THINKING_MAX_LEN), done: true });
     }
-    await this.patchFull();
+
+    // ★ M3 修复：防抖合并短间隔 delta，避免短时间多次 PATCH 触发飞书限频
+    if (this.thinkingTimeout) clearTimeout(this.thinkingTimeout);
+    this.thinkingTimeout = setTimeout(() => {
+      this.patchFull();
+    }, STREAM_INTERVAL_MS);
+    this.pendingThinking = true;
   }
 
   /** 回答流式累积（text-delta）→ main_text 打字机 */
