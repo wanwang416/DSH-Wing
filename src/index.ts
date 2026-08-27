@@ -414,16 +414,41 @@ export function apply(ctx: any, rawConfig: unknown): void {
         }
         case "card.action.trigger": {
           // 处理 ask-user-question 选项点击 → 把用户选择注入 agent
+          // ★ 诊断日志：打印完整事件结构，定位"点击无响应"卡在哪一步
+          logger.info?.(`card.action.trigger 收到事件 data=${JSON.stringify(d).slice(0, 1000)}`);
           try {
-            const chatId = d.chat?.chat_id;
-            if (!chatId) break;
-            // 提取 name 和 value → name 格式: answer:questionId:optionIdx
-            const actionName = d.action?.name;
-            if (!actionName || !actionName.startsWith("answer:")) break;
+            // 飞书事件 chat_id 可能在多个位置（不同客户端/SDK版本字段位置不同）
+            const chatId =
+              (d as any).chat_id ??
+              d?.chat?.chat_id ??
+              (d as any).message?.chat_id ??
+              (d as any).open_chat_id ??
+              (d as any).event?.open_chat_id ??
+              (d as any).event?.chat_id;
+            if (!chatId) {
+              logger.warn?.(`card.action.trigger: 取不到 chatId，事件字段不匹配。可用键=${Object.keys(d).join(",")}`);
+              break;
+            }
+            // 提取 name → name 格式: answer:questionId:optionIdx（兼容 event 外层包装）
+            const actionName = d.action?.name ?? (d as any).event?.action?.name;
+            if (!actionName || !actionName.startsWith("answer:")) {
+              logger.warn?.(`card.action.trigger: actionName 不匹配 answer: 前缀，actionName=${actionName ?? "undefined"}`);
+              break;
+            }
+            logger.info?.(`card.action.trigger: chatId=${chatId} actionName=${actionName}`);
             // ★ M3 任务 1：先让提问桥 resolve 待答 Promise + 更新卡片"✅ 已选择"；已消费则不再 steer
             if (userQuestionBridge.onCardAction(chatId, actionName)) break;
-            const value = d.action?.value ? JSON.parse(d.action.value) : null;
-            if (!value?.label) break;
+            // value 兼容：schema 2.0 是对象，schema 1.0 是 JSON 字符串
+            const rawValue = d.action?.value ?? (d as any).event?.action?.value;
+            const value = rawValue
+              ? typeof rawValue === "string"
+                ? JSON.parse(rawValue)
+                : rawValue
+              : null;
+            if (!value?.label) {
+              logger.warn?.(`card.action.trigger: value 无 label，value=${JSON.stringify(value)}`);
+              break;
+            }
             // 用户选择了: value.label → 作为文本 steer 注入 agent（兜底：无待答问题时保持 M2 行为）
             // 1) 获取 agent
             (async () => {
