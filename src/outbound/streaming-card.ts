@@ -189,6 +189,8 @@ export class StreamingCard {
   // ★ M3 修复：addThinking 防抖合并：避免 reasoning 每小段都 PATCH，短时间多 chunk 合并
   private thinkingTimeout: NodeJS.Timeout | null = null;
   private pendingThinking = false;
+  // ★ 全局防抖：所有面板更新合并，短时间多次操作只发一次 PATCH，避免飞书 230020 限频
+  private updateTimeout: NodeJS.Timeout | null = null;
 
   constructor(chatId: string, deps: StreamingCardDeps) {
     this.chatId = chatId;
@@ -312,6 +314,28 @@ export class StreamingCard {
     }
   }
 
+  /** 全局防抖：串行化所有 patch，避免飞书限频 */
+  private async patchDebounced(): Promise<void> {
+    if (this.failed) return;
+    const currentLen = this.contentLength();
+    const lenDiff = Math.abs(currentLen - this.lastPatchLength);
+    const now = Date.now();
+    const timeDiff = now - this.lastPatchAt;
+    if (this.lastPatchAt !== 0 && timeDiff < STREAM_INTERVAL_MS && lenDiff < STREAM_MIN_DELTA) return;
+    this.lastPatchLength = currentLen;
+    this.lastPatchAt = now;
+    try {
+      await this.deps.sender.updateCard(this.messageId!, this.fullCardJson(false).json);
+    } catch (err) {
+      this.failed = true;
+      this.deps.logger?.warn?.(`StreamingCard 全量更新失败，降级普通消息: ${err instanceof Error ? err.message : String(err)}`);
+      const answer = this.answer.trim();
+      if (answer && answer !== "No response.") {
+        await this.deps.onFallback?.(this.chatId, answer);
+      }
+    }
+  }
+
   /** 回答流式（text-delta）：CardKit 打字机 PUT main_text；失败降级 inline 全量更新 */
   private async patchAnswer(): Promise<void> {
     if (!(await this.ensureCreated())) return;
@@ -327,7 +351,7 @@ export class StreamingCard {
         await this.streamContent(this.answer);
         return;
       }
-      await this.deps.sender.updateCard(this.messageId!, this.fullCardJson(false).json);
+      await this.patchDebounced();
     } catch (err) {
       // 一级降级：CardKit → inline updateMessage
       if (this.streamMode === "cardkit") {
@@ -346,6 +370,15 @@ export class StreamingCard {
     }
   }
 
+  /** 全局防抖调度：短时间多个面板更新合并为一次全量PATCH */
+  private schedulePatch(): void {
+    if (this.failed) return;
+    if (this.updateTimeout) clearTimeout(this.updateTimeout);
+    this.updateTimeout = setTimeout(() => {
+      this.patchFull();
+    }, STREAM_INTERVAL_MS);
+  }
+
   /** 思考流式累积（reasoning-delta）→ 面板更新（全量） */
   async addThinking(delta: string): Promise<void> {
     if (this.failed || !delta) return;
@@ -359,7 +392,7 @@ export class StreamingCard {
     // ★ M3 修复：防抖合并短间隔 delta，避免短时间多次 PATCH 触发飞书限频
     if (this.thinkingTimeout) clearTimeout(this.thinkingTimeout);
     this.thinkingTimeout = setTimeout(() => {
-      this.patchFull();
+      this.patchDebounced();
     }, STREAM_INTERVAL_MS);
     this.pendingThinking = true;
   }
@@ -368,14 +401,14 @@ export class StreamingCard {
   async addText(delta: string): Promise<void> {
     if (this.failed) return;
     this.answer += delta;
-    await this.patchAnswer();
+    this.schedulePatch();
   }
 
   /** 工具调用步骤（tool/call）→ Tools 面板新增一行 */
   async addTool(name: string, input?: string): Promise<void> {
     if (this.failed) return;
     this.steps.push({ kind: "tool", name, summary: input ?? "", done: false });
-    await this.patchFull();
+    this.schedulePatch();
   }
 
   /** 工具结果（tool/result）→ 更新对应步骤的 done/result（对齐基底 ToolStep.Done/Result） */
@@ -395,14 +428,14 @@ export class StreamingCard {
       step.error = true;
       this.status = "error";
     }
-    await this.patchFull();
+    this.schedulePatch();
   }
 
   /** 上下文注入（user/message source.kind !== "user"）→ Tools 面板新增 📥 行 */
   async addContext(text?: string): Promise<void> {
     if (this.failed) return;
     this.steps.push({ kind: "context", name: "上下文注入", summary: truncateText(text ?? "", 120), done: true });
-    await this.patchFull();
+    this.schedulePatch();
   }
 
   /** 最终回答（assistant/message）：完整卡片落地 */

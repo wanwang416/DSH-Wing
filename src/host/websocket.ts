@@ -11,6 +11,7 @@ import { mkdirSync, rmSync, statSync, readFileSync, writeFileSync, existsSync } 
 import { join } from "node:path";
 
 const EVENT_MESSAGE = "im.message.receive_v1";
+const EVENT_CARD_ACTION = "card.action.trigger";
 
 export interface TransportDeps {
   getClient(): {
@@ -161,6 +162,7 @@ export function createTransport(deps: TransportDeps) {
       }
       if (c.on) {
         c.on(EVENT_MESSAGE, (data: unknown) => void handleEvent(EVENT_MESSAGE, data));
+        c.on(EVENT_CARD_ACTION, (data: unknown) => void handleEvent(EVENT_CARD_ACTION, data));
       }
       try {
         const bot = await c.getBotInfo?.();
