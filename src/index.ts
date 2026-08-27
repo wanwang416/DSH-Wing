@@ -34,6 +34,7 @@ import { createRouteStore } from "./session/persistence.js";
 import { createSerialQueue } from "./session/serial.js";
 import { createAgent, resumeAgent, type WingAgentHandle } from "./agent/caller.js";
 import { createForwarder } from "./agent/forwarder.js";
+import { createUserQuestionBridge, messageIdOfRes } from "./agent/user-questions.js";
 import { createExperience } from "./agent/experience.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
 import { createSender } from "./outbound/sender.js";
@@ -43,7 +44,7 @@ import { createReactionManager } from "./interactive/reaction.js";
 
 export const name = "dsh-wing";
 
-export const inject = ["tools", "commands", "agents", "systemPrompt", "credentials"];
+export const inject = ["tools", "commands", "agents", "systemPrompt", "credentials", "userQuestions"];
 
 /** 状态目录：<DSH_HOME>/wing（可用 DSH_WING_HOME 覆盖） */
 export function stateDir(): string {
@@ -83,6 +84,15 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
   // ---------- 出站（sender + outbox） ----------
   const sender = createSender({ getClient: getLarkClient, logger });
+  // ---------- M3 任务 1：ask-user-question 飞书桥（monkey-patch ctx.userQuestions.ask，飞书优先） ----------
+  const userQuestionBridge = createUserQuestionBridge({
+    sendCard: (chatId, card) => sender.sendCard(chatId, card),
+    updateCard: (messageId, cardJson) => sender.updateCard(messageId, cardJson),
+    sendText: (chatId, text) => sender.sendText(chatId, text),
+    messageIdOf: messageIdOfRes,
+    logger,
+  });
+  const disposeAskPatch = userQuestionBridge.patchAsk(ctx);
   const outbox = createOutbox({
     dir: join(dir, "outbox"),
     deliver: async (env) => {
@@ -148,14 +158,16 @@ export function apply(ctx: any, rawConfig: unknown): void {
         kind: "text",
         payload: { kind: "text", text },
       }) as unknown as Promise<void>,
-    // ★ 发送 ask-user-question 交互式提问卡片
-    sendAskUserQuestionCard: (chatId, questions) =>
-      sender.sendAskUserQuestionCard(chatId, questions) as unknown as Promise<void>,
     // ★ StreamingCard 工厂：单卡流式（思考/工具/回答聚合一张卡），降级回退 outbox text
     createStreamCard: (chatId) =>
       new StreamingCard(chatId, {
         sender,
         logger,
+        // ★ M3 任务 2：CardKit 流式打字机（两步创建 + PUT 流式）
+        cardkit: {
+          create: (cid, cardJson) => sender.sendCardKitCard(cid, cardJson),
+          stream: (cardId, content, sequence) => sender.streamCardContent(cardId, content, sequence),
+        },
         onFallback: (cid, text) =>
           outbox.enqueue({
             dedupeKey: `${cid}:fallback:${text.length}:${Date.now()}`,
@@ -175,11 +187,12 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const forwarder = createForwarder({
     onTurnStart: (chatId) => experience.onTurnStart(chatId),
     onChunk: (chatId, text) => experience.onChunk(chatId, text),
+    onThinking: (chatId, text) => experience.onThinking(chatId, text),
     onAssistantMessage: (chatId, text) => void experience.onAssistantMessage(chatId, text),
     onTurnEnd: (chatId, reason) => void experience.onTurnEnd(chatId, reason),
-    onToolCall: (chatId, name) => void experience.onToolCall(chatId, name),
+    onToolCall: (chatId, name, input) => void experience.onToolCall(chatId, name, input),
     onToolResult: (chatId, name, error) => void experience.onToolResult(chatId, name, error),
-    onAskUserQuestion: (chatId, questions) => experience.onAskUserQuestion(chatId, questions),
+    onContext: (chatId, text) => void experience.onContext(chatId, text),
   });
 
   // ---------- session 映射（createAgent 工厂：resume 优先，权限应用） ----------
@@ -235,6 +248,20 @@ export function apply(ctx: any, rawConfig: unknown): void {
     async handleInbound(msg: ParsedMessage) {
       // 0) 立即获取/创建 agent（不排队）
       const agent = await mapper!.getOrCreateAgent(msg.chatId);
+      // ★ M3 任务 1：先检查是否为待答问题的文本回复（多选/降级/自由文本）→ 消费，不 steer 注入
+      if (userQuestionBridge.onTextInbound(msg.chatId, msg.text)) {
+        inboundWal.accept({
+          messageId: msg.messageId,
+          chatId: msg.chatId,
+          chatType: msg.chatType,
+          text: msg.text,
+          senderOpenId: msg.userId,
+        });
+        inboundWal.delivered(msg.messageId);
+        compensation.noteDelivered(msg.messageId);
+        status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
+        return;
+      }
       // 1) 立即构造用户消息（不排队）
       const message = createUserMessage({
         content: [{ type: "text", text: msg.text }],
@@ -320,13 +347,14 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const batching = createBatching({
     onFlush: (chatId, items) => {
       // 合批到期：合并文本投给 dispatcher（构造合并事件）
+      // ★ M2 遗留修复：合批只发生在群聊（index.ts onMessage 群聊才 batching.add），chat_type 应为 group
       const text = batching.merge(items);
       const last = items[items.length - 1];
       void dispatcher.handleEvent("im.message.receive_v1", {
         message: {
           message_id: last.messageId,
           chat_id: chatId,
-          chat_type: "p2p",
+          chat_type: "group",
           message_type: "text",
           content: JSON.stringify({ text }),
         },
@@ -392,9 +420,11 @@ export function apply(ctx: any, rawConfig: unknown): void {
             // 提取 name 和 value → name 格式: answer:questionId:optionIdx
             const actionName = d.action?.name;
             if (!actionName || !actionName.startsWith("answer:")) break;
+            // ★ M3 任务 1：先让提问桥 resolve 待答 Promise + 更新卡片"✅ 已选择"；已消费则不再 steer
+            if (userQuestionBridge.onCardAction(chatId, actionName)) break;
             const value = d.action?.value ? JSON.parse(d.action.value) : null;
             if (!value?.label) break;
-            // 用户选择了: value.label → 作为文本 steer 注入 agent
+            // 用户选择了: value.label → 作为文本 steer 注入 agent（兜底：无待答问题时保持 M2 行为）
             // 1) 获取 agent
             (async () => {
               const agent = await mapper!.getOrCreateAgent(chatId);
@@ -560,6 +590,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     }, 10 * 60_000);
     sweep.unref?.();
     return async () => {
+      disposeAskPatch();
       clearInterval(sweep);
       await stopBridge();
     };

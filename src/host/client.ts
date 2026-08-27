@@ -19,6 +19,10 @@ export interface WingLarkClient {
   sendMessage(params: { receive_id_type: "chat_id" | "open_id"; params: Record<string, unknown> }): Promise<unknown>;
   /** 更新已发送的卡片消息（StreamingCard 单卡流式用） */
   updateMessage(params: { message_id: string; content: string }): Promise<unknown>;
+  /** ★ M3 任务 2：CardKit 创建卡片实体（POST /open-apis/cardkit/v1/cards）→ card_id */
+  createCardEntity?(cardJson: string): Promise<string>;
+  /** ★ M3 任务 2：CardKit 流式更新 main_text 元素（PUT，打字机动画） */
+  streamMessageContent?(cardId: string, content: string, sequence: number): Promise<unknown>;
   addReaction(params: { message_id: string; emoji_type: string }): Promise<unknown>;
   /** 拉取会话消息（丢消息补偿用，M2） */
   listMessages?(params: Record<string, unknown>): Promise<Array<{ messageId: string; timestampMs: number }>>;
@@ -164,6 +168,25 @@ export function buildLarkClient(opts: {
       return sdkClient.im.message.update({
         path: { message_id: params.message_id },
         data: { content: params.content } as never,
+      });
+    },
+    // ★ M3 任务 2：CardKit 流式打字机（node-sdk 1.73 无封装 → 原始 HTTP）
+    // 参考成熟桥接 createCardEntity (feishu.go:4594) + StreamRichCardText (feishu.go:4637)
+    async createCardEntity(cardJson: string): Promise<string> {
+      const res = (await sdkClient.request({
+        url: "/open-apis/cardkit/v1/cards",
+        method: "POST",
+        data: { type: "card_json", data: cardJson },
+      })) as any;
+      const cardId = res?.data?.card_id;
+      if (!cardId) throw new Error(`cardkit create: 无 card_id. ${JSON.stringify(res).slice(0, 200)}`);
+      return cardId as string;
+    },
+    async streamMessageContent(cardId: string, content: string, sequence: number): Promise<unknown> {
+      return sdkClient.request({
+        url: `/open-apis/cardkit/v1/cards/${cardId}/elements/main_text/content`,
+        method: "PUT",
+        data: { content, sequence },
       });
     },
     async addReaction(params) {
