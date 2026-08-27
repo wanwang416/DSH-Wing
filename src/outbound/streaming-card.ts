@@ -109,7 +109,7 @@ export function buildRichCardJson(
   const tools = steps.filter((s) => s.kind !== "thinking");
   const panels: Array<Record<string, unknown>> = [];
   if (reasoning.length > 0) {
-    panels.push(buildRichPanel(`Reasoning (${reasoning.length})`, streaming, buildPanelElements(reasoning)));
+    panels.push(buildRichPanel(`Reasoning (${reasoning.length})`, false, buildPanelElements(reasoning)));
   }
   if (tools.length > 0) {
     panels.push(buildRichPanel(`Tools (${tools.length})`, false, buildPanelElements(tools)));
@@ -392,7 +392,7 @@ export class StreamingCard {
     // ★ M3 修复：防抖合并短间隔 delta，避免短时间多次 PATCH 触发飞书限频
     if (this.thinkingTimeout) clearTimeout(this.thinkingTimeout);
     this.thinkingTimeout = setTimeout(() => {
-      this.patchDebounced();
+      this.patchFull();
     }, STREAM_INTERVAL_MS);
     this.pendingThinking = true;
   }

@@ -188,12 +188,16 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
       const res = await deps.sendCard(chatId, buildQuestionCard(entry.question));
       entry.cardMessageId = deps.messageIdOf(res);
       entry.mode = "card";
+      // ★ 修复：卡片发送成功后才启动超时计时器，避免发送过程中就超时
+      entry.timer = setTimeout(() => timeout(chatId, entry), timeoutMs);
       deps.logger?.info?.(`提问卡片已发送 chat=${chatId} q=${entry.question.id} mode=card`);
     } catch (err) {
       entry.mode = "text";
       deps.logger?.warn?.(`提问卡片发送失败，降级文本: ${err instanceof Error ? err.message : String(err)}`);
       try {
+        // 降级文本也需要启动计时器
         await deps.sendText(chatId, buildQuestionText(entry.question));
+        entry.timer = setTimeout(() => timeout(chatId, entry), timeoutMs);
       } catch (err2) {
         deps.logger?.warn?.(`提问文本降级也失败（将超时兜底）: ${err2 instanceof Error ? err2.message : String(err2)}`);
       }
@@ -212,7 +216,7 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
       }
       const entry: PendingEntry = { chatId, question, resolve, reject, mode: "card" };
       pending.set(chatId, entry);
-      entry.timer = setTimeout(() => timeout(chatId, entry), timeoutMs);
+      // ★ 修复：计时器移到 trySendCard 卡片发送成功后再启动，避免发送过程中超时
       request.signal?.addEventListener("abort", () => timeout(chatId, entry), { once: true });
       void trySendCard(chatId, entry);
     });
@@ -250,15 +254,31 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
      * @returns true=已消费（index.ts 不再 steer 注入）
      */
     onCardAction(chatId: string, actionName: string): boolean {
-      if (!actionName?.startsWith("answer:")) return false;
+      deps.logger?.info?.(`onCardAction 进入: chatId=${chatId} actionName=${actionName} pendingSize=${pending.size}`);
+      if (!actionName?.startsWith("answer:")) {
+        deps.logger?.warn?.(`onCardAction: actionName 不以 answer: 开头，actionName=${actionName}`);
+        return false;
+      }
       const entry = pending.get(chatId);
-      if (!entry) return false;
+      if (!entry) {
+        deps.logger?.warn?.(`onCardAction: pending 中找不到 chatId=${chatId}，pendingKeys=[${[...pending.keys()].join(",")}]`);
+        return false;
+      }
       const parts = actionName.split(":");
-      if (parts.length < 3) return false;
+      if (parts.length < 3) {
+        deps.logger?.warn?.(`onCardAction: actionName 格式错误，parts=${parts.join("|")}`);
+        return false;
+      }
       const optIdx = Number(parts[2]);
       const opt = entry.question.options?.[optIdx];
-      if (!opt) return false;
-      if (!resolveEntry(chatId, entry, [opt.label])) return true;
+      if (!opt) {
+        deps.logger?.warn?.(`onCardAction: 选项不存在，optIdx=${optIdx} optionsCount=${entry.question.options?.length ?? 0}`);
+        return false;
+      }
+      if (!resolveEntry(chatId, entry, [opt.label])) {
+        deps.logger?.warn?.(`onCardAction: resolveEntry 失败（entry 已过期）`);
+        return true;
+      }
       if (entry.cardMessageId) {
         deps.updateCard(entry.cardMessageId, JSON.stringify(buildAnsweredCard(entry.question, opt.label))).catch(() => void 0);
       }
