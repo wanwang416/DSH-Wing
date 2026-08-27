@@ -91,6 +91,8 @@ export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
     body.push({ tag: "note", elements: [{ tag: "plain_text", content: "请回复数字，多个用逗号分隔（如 1,3）" }] });
   } else {
     // 单选：每选项一个按钮（对齐基底 sendAskQuestionPrompt 单选分支 / onCardAction）
+    // ★ M3 真机修复：schema 2.0 不支持 {tag:"action"} 组件（飞书实测 200861
+    //   "unsupported tag action"），按钮必须平铺进 body.elements（飞书实测通过）
     actions = opts.map((o, i) => ({
       tag: "button",
       type: "default",
@@ -107,8 +109,7 @@ export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
     schema: "2.0",
     config: { update_multi: true },
     header: { title: { tag: "plain_text", content: `❓ ${q.header ?? "请选择"}` }, template: "blue" },
-    body: { elements: body },
-    ...(actions.length > 0 ? { actions: { elements: actions } } : {}),
+    body: { elements: [...body, ...actions] },
   };
 }
 

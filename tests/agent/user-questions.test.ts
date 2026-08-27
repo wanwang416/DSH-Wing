@@ -42,11 +42,15 @@ describe("提问卡片构建（对齐基底 sendAskQuestionPrompt / renderCardMa
     expect(card.header.title.tag).toBe("plain_text");
     expect(card.header.title.content).toBe("❓ 确认");
     expect(card.header.template).toBe("blue");
-    const actions = card.actions.elements;
-    expect(actions).toHaveLength(2);
-    expect(actions[0].name).toBe("answer:q1:0");
-    expect(actions[1].name).toBe("answer:q1:1");
-    expect(JSON.parse(actions[0].value).label).toBe("A");
+    // ★ M3 真机修复：schema 2.0 无顶层 actions、不支持 {tag:"action"} 组件（飞书 200861），
+    //   按钮平铺在 body.elements 尾部
+    const elements = card.body.elements as Array<Record<string, unknown>>;
+    const buttons = elements.filter((e) => e.tag === "button");
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].name).toBe("answer:q1:0");
+    expect(buttons[1].name).toBe("answer:q1:1");
+    expect(JSON.parse(buttons[0].value as string).label).toBe("A");
+    expect(card.actions).toBeUndefined();
   });
 
   it("多选：无按钮，编号文本列表（对齐基底多选分支）", () => {

@@ -165,7 +165,10 @@ export function buildLarkClient(opts: {
     },
     async updateMessage(params) {
       // StreamingCard 单卡流式：更新已发送的卡片消息
-      return sdkClient.im.message.update({
+      // ★ M3 真机修复：改用 PATCH（对齐基底 RefreshCard feishu.go:68 PatchMessageReq，
+      //   仅传 content）。PUT /im/v1/messages/:id 对 interactive 消息实测不可用：
+      //   带 msg_type=interactive → 230001 invalid；text → 230054 不支持；不带 → 99992402
+      return sdkClient.im.message.patch({
         path: { message_id: params.message_id },
         data: { content: params.content } as never,
       });
@@ -183,6 +186,7 @@ export function buildLarkClient(opts: {
       return cardId as string;
     },
     async streamMessageContent(cardId: string, content: string, sequence: number): Promise<unknown> {
+      // 基底 StreamRichCardText (feishu.go:4656) 仅传 content + sequence，勿加其他字段
       return sdkClient.request({
         url: `/open-apis/cardkit/v1/cards/${cardId}/elements/main_text/content`,
         method: "PUT",
