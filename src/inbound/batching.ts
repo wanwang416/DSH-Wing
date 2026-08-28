@@ -21,6 +21,9 @@ export const DEFAULT_BATCH: BatchConfig = {
 export interface BatchItem {
   messageId: string;
   text: string;
+  /** ★ M4-R3 任务 4：事件层真实 chatType（合批 flush 透传用）。
+   *  飞书 P2P 会话的 chat_id 同样是 oc_ 前缀，前缀猜测不可靠；有真值必须透传。 */
+  chatType?: "group" | "p2p";
 }
 
 export interface BatchingDeps {

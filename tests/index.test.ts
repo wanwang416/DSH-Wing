@@ -434,6 +434,29 @@ describe("index.ts apply 集成（M4 覆盖重构）", () => {
     await vi.waitFor(() => expect(h.wal.accept).toHaveBeenCalled());
   });
 
+  it("onMessage：P2P 会话（oc_ 前缀 chatId）→ chat_type 用事件真值 p2p（M4-R3 任务 4，不误判 group）", async () => {
+    const ctx = makeCtx();
+    await startBridge(ctx);
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge started")));
+    // ALAN P2P 会话实证：chatId=oc_1310… 但事件 chat_type=p2p
+    await h.transportOpts.onMessage(p2pMsg("om_p2p1", "你好", "oc_1310ac85febf004d34aa554d341b3d8a"));
+    await vi.waitFor(() => expect(h.wal.accept).toHaveBeenCalled());
+    const accepted = h.wal.accept.mock.calls.at(-1)![0];
+    expect(accepted.chatType).toBe("p2p");
+  });
+
+  it("onMessage：群聊合批 flush → chat_type 透传事件真值 group（不靠前缀猜测）", async () => {
+    const ctx = makeCtx();
+    await startBridge(ctx);
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge started")));
+    await h.transportOpts.onMessage(groupMsg("om_g1", "群1", "oc_1"));
+    await h.transportOpts.onMessage(groupMsg("om_g2", "群2", "oc_1"));
+    await vi.advanceTimersByTimeAsync(700);
+    await vi.waitFor(() => expect(h.wal.accept).toHaveBeenCalled());
+    const accepted = h.wal.accept.mock.calls.at(-1)![0];
+    expect(accepted.chatType).toBe("group");
+  });
+
   it("onEvent：转发到 createEventHandler（接线验证）", async () => {
     const ctx = makeCtx();
     await startBridge(ctx);

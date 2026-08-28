@@ -81,6 +81,26 @@ describe("StreamingCard（inline 模式）", () => {
     return { sender, onFallback, logger, card };
   }
 
+  it("并发 addTool + addText（inline 模式）→ sendCard 只调用 1 次（单飞保护）", async () => {
+    const sender = makeSender();
+    let resolveSend!: (v: { data: { message_id: string } }) => void;
+    sender.sendCard.mockImplementation(() => new Promise((res) => { resolveSend = res; }));
+    const card = new StreamingCard("oc_1", {
+      sender,
+      onFallback: vi.fn(() => Promise.resolve()),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+    card.addTool("bash");
+    const pAdd = card.addText("你好");
+    await Promise.resolve();
+    expect(sender.sendCard).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(STREAM_INTERVAL_MS + 10);
+    expect(sender.sendCard).toHaveBeenCalledTimes(1);
+    resolveSend({ data: { message_id: "m_1" } });
+    await pAdd;
+    expect(sender.sendCard).toHaveBeenCalledTimes(1);
+  });
+
   it("addThinking 建 thinking 步骤 → patchFull → sendCard + updateCard（sendCard 返回 SDK 标准 data.message_id）", async () => {
     const { sender, card } = setup();
     sender.sendCard.mockResolvedValue({ data: { message_id: "m_1" } });
@@ -239,6 +259,43 @@ describe("StreamingCard（cardkit 模式）", () => {
     const card = new StreamingCard("oc_1", { sender, onFallback, logger, cardkit });
     return { sender, onFallback, logger, card };
   }
+
+  it("并发 addTool + addText 首次激活 → cardkit.create 只调用 1 次（单飞保护）", async () => {
+    const cardkit = makeCardkit();
+    let resolveCreate!: (v: { messageId: string; cardId: string }) => void;
+    cardkit.create.mockImplementation(() => new Promise((res) => { resolveCreate = res; }));
+    const { card } = setup(cardkit);
+    card.addTool("bash"); // 创建线 A：schedulePatch 1500ms 后 patchFull → ensureCreated
+    const pAdd = card.addText("你好"); // 创建线 B：立即 patchAnswer → ensureCreated
+    await Promise.resolve();
+    expect(cardkit.create).toHaveBeenCalledTimes(1);
+    // 打字机定时触发线 A 的 patchFull → ensureCreated → 必须复用同一 createPromise
+    await vi.advanceTimersByTimeAsync(STREAM_INTERVAL_MS + 10);
+    expect(cardkit.create).toHaveBeenCalledTimes(1);
+    // 释放创建 → 两条线都完成，全程仅 1 次 create
+    resolveCreate({ messageId: "m_1", cardId: "c_1" });
+    await pAdd;
+    expect(cardkit.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("cardkit.create 失败 → 单飞清空，降级 inline sendCard 成功且后续不二次 create", async () => {
+    const cardkit = makeCardkit();
+    let rejectCreate!: (e: Error) => void;
+    cardkit.create.mockImplementation(() => new Promise((_, rej) => { rejectCreate = rej; }));
+    const { sender, card } = setup(cardkit);
+    sender.sendCard.mockResolvedValue({ data: { message_id: "m_1" } });
+    const p = card.addText("x");
+    await Promise.resolve();
+    rejectCreate(new Error("boom"));
+    await p;
+    // CardKit 失败 → 降级 inline sendCard 建卡
+    expect(sender.sendCard).toHaveBeenCalledTimes(1);
+    // messageId 已设 → 后续 addTool 不再走 create，直接 updateCard
+    card.addTool("bash");
+    await vi.advanceTimersByTimeAsync(STREAM_INTERVAL_MS + 10);
+    expect(cardkit.create).toHaveBeenCalledTimes(1);
+    expect(sender.updateCard).toHaveBeenCalled();
+  });
 
   it("cardkit.create 成功 → addText 走 cardkit.stream（sequence 递增）", async () => {
     const cardkit = makeCardkit();

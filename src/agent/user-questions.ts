@@ -72,6 +72,23 @@ export function messageIdOfRes(res: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * ★ M4-R3 任务 2：描述卡片发送失败原因（降级可解释）。
+ * axios 错误带 response：格式 `(400): code=xxx msg=xxx`（飞书拒绝 body 的 code/msg）。
+ * 无 response（网络/超时等）：回退 err.message / 字符串化。
+ */
+export function describeSendError(err: unknown): string {
+  const resp = (err as { response?: { status?: number; data?: unknown } })?.response;
+  if (resp) {
+    const d = resp.data as { code?: unknown; msg?: unknown } | undefined;
+    if (d && typeof d === "object" && (d.code !== undefined || d.msg !== undefined)) {
+      return `(${resp.status ?? "?"}): code=${d.code ?? "?"} msg=${d.msg ?? "?"}`;
+    }
+    return `(${resp.status ?? "?"}): ${JSON.stringify(resp.data).slice(0, 300)}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** 构建提问卡片（schema 2.0：单选按钮 / 多选编号列表） */
 export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
   const opts = q.options ?? [];
@@ -196,7 +213,10 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
       deps.logger?.info?.(`提问卡片已发送 chat=${chatId} q=${entry.question.id} mode=card`);
     } catch (err) {
       entry.mode = "text";
-      deps.logger?.warn?.(`提问卡片发送失败，降级文本: ${err instanceof Error ? err.message : String(err)}`);
+      // ★ M4-R3 任务 2：400 盲降级修复——不再只打 err.message（axios 状态行）。
+      //   提取飞书拒绝原因（axios 错误 response.status + response.data 的 code/msg），
+      //   降级必须可解释：每次降级日志都能看到飞书给的拒绝理由。
+      deps.logger?.warn?.(`提问卡片发送失败，降级文本 ${describeSendError(err)}`);
       try {
         // 降级文本也需要启动计时器
         await deps.sendText(chatId, buildQuestionText(entry.question));

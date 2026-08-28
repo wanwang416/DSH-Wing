@@ -37,4 +37,26 @@ describe("batching 合批", () => {
     await sleep(100);
     expect(onFlush).toHaveBeenCalledTimes(2);
   });
+
+  it("BatchItem 带 chatType → flush 保留真实 chatType（透传，M4-R3 任务 4）", async () => {
+    const onFlush = vi.fn();
+    const batching = createBatching({ cfg: { windowMs: 50, maxCount: 8, maxChars: 4000 }, onFlush });
+    // oc_ 前缀 chatId 但事件真值是 p2p（P2P 会话实证）→ 透传 p2p
+    batching.add("oc_1310ac85febf004d34aa554d341b3d8a", { messageId: "m1", text: "你好", chatType: "p2p" });
+    batching.add("oc_1310ac85febf004d34aa554d341b3d8a", { messageId: "m2", text: "在吗", chatType: "p2p" });
+    await sleep(100);
+    const items = onFlush.mock.calls[0][1] as Array<{ chatType?: string }>;
+    expect(items).toHaveLength(2);
+    expect(items[0].chatType).toBe("p2p");
+    expect(items[1].chatType).toBe("p2p");
+  });
+
+  it("BatchItem 无 chatType → flush 条目 chatType 为 undefined（调用方兜底）", async () => {
+    const onFlush = vi.fn();
+    const batching = createBatching({ cfg: { windowMs: 50, maxCount: 8, maxChars: 4000 }, onFlush });
+    batching.add("oc_1", { messageId: "m1", text: "旧格式" });
+    await sleep(100);
+    const items = onFlush.mock.calls[0][1] as Array<{ chatType?: string }>;
+    expect(items[0].chatType).toBeUndefined();
+  });
 });

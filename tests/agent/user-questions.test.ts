@@ -144,6 +144,40 @@ describe("bridge 端到端（A1/A2/A3）", () => {
     expect(sendText).toHaveBeenCalledWith("oc_1", expect.stringContaining("❓"));
   });
 
+  it("400 盲降级修复：日志含飞书拒绝响应体 code/msg（axios 错误）", async () => {
+    const { bridge, sendCard, sendText, logger } = makeBridge();
+    sendCard.mockRejectedValue({
+      message: "Request failed with status code 400",
+      response: { status: 400, data: { code: 240001, msg: "参数错误: body 校验失败" } },
+    });
+    const ctx = makeCtx();
+    bridge.patchAsk(ctx);
+    void (ctx.userQuestions as any).ask({
+      agent: { id: "feishu:oc_1:123:0" },
+      questions: [{ id: "q3_kpi", question: "当前门店数量？", options: [{ label: "1-5" }, { label: "6-20" }, { label: "20+" }] }],
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    // 降级文本仍走（降级路径保留）
+    expect(sendText).toHaveBeenCalled();
+    // ★ 验收：400 时日志含响应体 code/msg，降级可解释
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("code=240001"));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("msg=参数错误"));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("(400)"));
+  });
+
+  it("非 axios 错误 → 日志仍含 err.message（可解释）", async () => {
+    const { bridge, sendCard, logger } = makeBridge();
+    sendCard.mockRejectedValue(new Error("network down"));
+    const ctx = makeCtx();
+    bridge.patchAsk(ctx);
+    void (ctx.userQuestions as any).ask({
+      agent: { id: "feishu:oc_1:123:0" },
+      questions: [{ id: "q", question: "选？", options: [{ label: "A" }] }],
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("network down"));
+  });
+
   it("多选文本回复 → resolve 多个 label", async () => {
     const { bridge } = makeBridge();
     const ctx = makeCtx();
