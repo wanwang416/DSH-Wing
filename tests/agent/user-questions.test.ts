@@ -31,7 +31,7 @@ function makeCtx(originalAsk = vi.fn().mockResolvedValue({ answers: [] })) {
 }
 
 describe("提问卡片构建（对齐基底 sendAskQuestionPrompt / renderCardMap）", () => {
-  it("单选：每选项一个按钮，name=answer:qid:idx，header 用 plain_text", () => {
+  it("单选：每选项一个按钮，behaviors 回调 action=answer:qid:idx，header 用 plain_text", () => {
     const card = buildQuestionCard({
       id: "q1",
       question: "选方案？",
@@ -43,13 +43,13 @@ describe("提问卡片构建（对齐基底 sendAskQuestionPrompt / renderCardMa
     expect(card.header.title.content).toBe("❓ 确认");
     expect(card.header.template).toBe("blue");
     // ★ M3 真机修复：schema 2.0 无顶层 actions、不支持 {tag:"action"} 组件（飞书 200861），
-    //   按钮平铺在 body.elements 尾部
+    //   按钮平铺在 body.elements 尾部；回调必须用 behaviors[{type:'callback',value}]
     const elements = card.body.elements as Array<Record<string, unknown>>;
     const buttons = elements.filter((e) => e.tag === "button");
     expect(buttons).toHaveLength(2);
-    expect(buttons[0].name).toBe("answer:q1:0");
-    expect(buttons[1].name).toBe("answer:q1:1");
-    expect(JSON.parse(buttons[0].value as string).label).toBe("A");
+    expect(buttons[0].behaviors[0].value.action).toBe("answer:q1:0");
+    expect(buttons[1].behaviors[0].value.action).toBe("answer:q1:1");
+    expect(buttons[0].behaviors[0].value.label).toBe("A");
     expect(card.actions).toBeUndefined();
   });
 
