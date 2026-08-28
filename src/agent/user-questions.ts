@@ -145,14 +145,14 @@ export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
         type: "primary",
         width: "fill",
         text: { tag: "plain_text", content: "提交反馈" },
-        // ★ M4-R4 修复（真机回归 300123）：form 内按钮必须声明表单事件，
-        //   否则飞书 400 `there is no submit button in the form container` → 整卡降级文本。
-        //   form_action(behavior: submit) = 绑定表单提交（回调带 action.form_values）；
-        //   callback = 携带识别用的 action 名（feedback:<qid>）。两者可并列（文档 JSON 示例）。
-        behaviors: [
-          { type: "form_action", behavior: "submit" },
-          { type: "callback", value: { action: `feedback:${q.id}` } },
-        ],
+        // ★ M4-R4 修复（真机两连回归）：form 内按钮声明提交事件用**按钮顶层字段**
+        //   action_type: "form_submit"（schema 2.0 官方字段），不是 behaviors 里的 form_action。
+        //   - 第一次只用 callback → 300123 there is no submit button in the form container
+        //   - 第二次补 behaviors form_action → 200621 unknown behavior type（发送通道解析器不认识）
+        //   action_type: form_submit = 绑定表单提交（点击回调带 action.form_values）；
+        //   behaviors callback = 携带识别用的 action 名（feedback:<qid>）。
+        action_type: "form_submit",
+        behaviors: [{ type: "callback", value: { action: `feedback:${q.id}` } }],
       },
     ],
   };
