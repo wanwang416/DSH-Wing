@@ -106,7 +106,7 @@ export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
           : "（无预设选项，直接回复你的答案）",
     });
     // ★ M4-R4 修复（现象 2）：schema 2.0 不再支持 note 组件（报错 200861 → 卡片 400 必降级），改 markdown 提示
-    body.push({ tag: "markdown", content: "请回复数字，多个用逗号分隔（如 1,3），或用下方输入框提交其他回答" });
+    body.push({ tag: "markdown", content: "请回复数字，多个用逗号分隔（如 1,3），或直接回复你的答案" });
   } else {
     // 单选：每选项一个按钮（对齐基底 sendAskQuestionPrompt 单选分支 / onCardAction）
     // ★ M3 根因修复：schema 2.0 按钮回调必须用 behaviors[{type:'callback',value}]，
@@ -123,45 +123,18 @@ export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
     }));
     if (actions.length === 0) {
       // ★ M4-R4 修复（现象 2）：note → markdown
-      body.push({ tag: "markdown", content: "请直接回复你的答案，或用下方输入框提交" });
+      body.push({ tag: "markdown", content: "请直接回复你的答案" });
     }
   }
 
-  // ★ M4-R4 修复（现象 3）：卡片内置「其他反馈」输入框（form + input + 提交按钮）——
-  //   用户不选选项也能在卡片内直接输入回答（内置插话，直接命中 agent）。
-  //   提交回调走 feedback: 前缀，用户输入在 action.form_values.free_text。
-  const form: Record<string, unknown> = {
-    tag: "form",
-    name: `ask_feedback_${q.id}`,
-    elements: [
-      {
-        tag: "input",
-        name: "free_text",
-        label: { tag: "plain_text", content: "💬 其他反馈" },
-        placeholder: { tag: "plain_text", content: "不选上面选项，直接输入你的回答" },
-      },
-      {
-        tag: "button",
-        type: "primary",
-        width: "fill",
-        text: { tag: "plain_text", content: "提交反馈" },
-        // ★ M4-R4 修复（真机两连回归）：form 内按钮声明提交事件用**按钮顶层字段**
-        //   action_type: "form_submit"（schema 2.0 官方字段），不是 behaviors 里的 form_action。
-        //   - 第一次只用 callback → 300123 there is no submit button in the form container
-        //   - 第二次补 behaviors form_action → 200621 unknown behavior type（发送通道解析器不认识）
-        //   action_type: form_submit = 绑定表单提交（点击回调带 action.form_values）；
-        //   behaviors callback = 携带识别用的 action 名（feedback:<qid>）。
-        action_type: "form_submit",
-        behaviors: [{ type: "callback", value: { action: `feedback:${q.id}` } }],
-      },
-    ],
-  };
-
+  // ★ M4-R4 灾难回退（2026-08-28）：form 容器在 im 直发通道（sendCard）下无法声明提交按钮
+  //   （300123→200621→300123 三连败，见 Obsidian 灾难记录），整个 form 移除。
+  //   现象 3「卡片内插话」留 M5 用非 form 方案（callback 按钮引导打字）。
   return {
     schema: "2.0",
     config: { update_multi: true },
     header: { title: { tag: "plain_text", content: `❓ ${q.header ?? "请选择"}` }, template: "blue" },
-    body: { elements: [...body, ...actions, form] },
+    body: { elements: [...body, ...actions] },
   };
 }
 
@@ -217,24 +190,6 @@ export function resolveTextAnswer(q: PendingQuestion, rawInput: string): { selec
   return { selected: [] };
 }
 
-/**
- * ★ M4-R4 修复（现象 3）：从卡片 form 提交回调提取用户自由文本。
- * 飞书 schema 2.0 form 提交 → 回调携带 action.form_values = { [input.name]: 值 }。
- * 优先取 free_text 字段，兜底任意第一个非空字符串值（兼容不同 input 命名）。
- */
-export function extractFeedbackText(formValues: unknown): string {
-  if (!formValues || typeof formValues !== "object") return "";
-  const fv = formValues as Record<string, unknown>;
-  for (const key of ["free_text", "text", "value"]) {
-    const v = fv[key];
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-  for (const v of Object.values(fv)) {
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-  return "";
-}
-
 export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
   const pending = new Map<string, PendingEntry>();
   const timeoutMs = deps.timeoutMs ?? 30_000;
@@ -250,34 +205,6 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
     if (entry.timer) clearTimeout(entry.timer);
     pending.delete(chatId);
     entry.resolve({ id: entry.question.id, selected, ...(custom !== undefined ? { custom } : {}) });
-    return true;
-  }
-
-  /** ★ M4-R4 修复（现象 3）：卡片「其他反馈」提交 → 自由文本作为 custom 答案 resolve 待答问题 */
-  function handleFeedback(chatId: string, actionName: string, formValues: unknown): boolean {
-    const entry = pending.get(chatId);
-    if (!entry) {
-      deps.logger?.warn?.(`onCardAction(feedback): pending 中找不到 chatId=${chatId}，pendingKeys=[${[...pending.keys()].join(",")}]`);
-      return false;
-    }
-    const qid = actionName.split(":")[1];
-    if (qid && qid !== entry.question.id) {
-      deps.logger?.warn?.(`onCardAction(feedback): qid 不匹配，qid=${qid} 期望=${entry.question.id}`);
-      return false;
-    }
-    const text = extractFeedbackText(formValues);
-    if (!text) {
-      deps.sendText(chatId, "⚠️ 反馈框是空的，请输入内容后提交").catch(() => void 0);
-      return true;
-    }
-    if (!resolveEntry(chatId, entry, [], text)) {
-      deps.logger?.warn?.(`onCardAction(feedback): resolveEntry 失败（entry 已过期）`);
-      return true;
-    }
-    if (entry.cardMessageId) {
-      deps.updateCard(entry.cardMessageId, JSON.stringify(buildAnsweredCard(entry.question, text))).catch(() => void 0);
-    }
-    deps.logger?.info?.(`提问卡片自由反馈 chat=${chatId} q=${entry.question.id} → ${text}`);
     return true;
   }
 
@@ -351,18 +278,13 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
     },
 
     /**
-     * 卡片按钮回调 → resolve 待答问题。
-     * - answer: 前缀：单选按钮点击（对齐基底 onCardAction）
-     * - feedback: 前缀：卡片内「其他反馈」输入框提交（★ M4-R4 现象 3），自由文本作为 custom 答案
+     * 卡片按钮回调 → resolve 待答问题（answer: 前缀 = 选项按钮点击）。
      * @returns true=已消费（index.ts 不再 steer 注入）
      */
-    onCardAction(chatId: string, actionName: string, formValues?: unknown): boolean {
-      deps.logger?.info?.(`onCardAction 进入: chatId=${chatId} actionName=${actionName} formValues=${formValues ? JSON.stringify(formValues).slice(0, 200) : "undefined"} pendingSize=${pending.size}`);
-      if (actionName?.startsWith("feedback:")) {
-        return handleFeedback(chatId, actionName, formValues);
-      }
+    onCardAction(chatId: string, actionName: string): boolean {
+      deps.logger?.info?.(`onCardAction 进入: chatId=${chatId} actionName=${actionName} pendingSize=${pending.size}`);
       if (!actionName?.startsWith("answer:")) {
-        deps.logger?.warn?.(`onCardAction: actionName 不以 answer:/feedback: 开头，actionName=${actionName}`);
+        deps.logger?.warn?.(`onCardAction: actionName 不以 answer: 开头，actionName=${actionName}`);
         return false;
       }
       const entry = pending.get(chatId);

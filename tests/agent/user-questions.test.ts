@@ -5,7 +5,6 @@ import {
   buildAnsweredCard,
   buildQuestionText,
   resolveTextAnswer,
-  extractFeedbackText,
   messageIdOfRes,
   ASK_ABORTED,
 } from "../../src/agent/user-questions.js";
@@ -72,36 +71,31 @@ describe("提问卡片构建（对齐基底 sendAskQuestionPrompt / renderCardMa
     expect(card.body.elements[2].content).toContain("请回复数字");
   });
 
-  it("卡片底部含「其他反馈」form+input+提交按钮（★ M4-R4 现象 3）", () => {
+  it("卡片不含 form/input（★ M4-R4 灾难回退：im 直发通道 form 提交按钮三连败 300123/200621/300123）", () => {
     const card = buildQuestionCard({ id: "q1", question: "选方案？", options: [{ label: "A" }] }) as any;
     const elements = card.body.elements as Array<Record<string, unknown>>;
-    const form = elements[elements.length - 1];
-    expect(form.tag).toBe("form");
-    expect(form.name).toBe("ask_feedback_q1");
-    const sub = form.elements as Array<Record<string, unknown>>;
-    expect(sub[0].tag).toBe("input");
-    expect(sub[0].name).toBe("free_text");
-    expect(sub[1].tag).toBe("button");
-    // ★ M4-R4 真机两连回归：form 内按钮必须顶层 action_type: "form_submit"
-    //   （300123 无提交按钮 → 200621 behaviors form_action 不识别，最终定为官方字段）
-    expect(sub[1].action_type).toBe("form_submit");
-    expect(sub[1].behaviors[0]).toMatchObject({ type: "callback", value: { action: "feedback:q1" } });
+    const tags = elements.map((e) => e.tag);
+    // form 在 im.message 直发通道无法声明提交按钮（三版报错见 Obsidian 灾难记录），整体移除
+    expect(tags).not.toContain("form");
+    expect(tags).not.toContain("input");
+    // 末位元素回归为选项按钮
+    expect(elements[elements.length - 1].tag).toBe("button");
   });
 
-  it("多选卡片同样带反馈输入框，且无 note（★ M4-R4 现象 2+3）", () => {
+  it("多选卡片无 note 无 form（★ M4-R4 现象 2 修复保留 + 灾难回退）", () => {
     const card = buildQuestionCard({ id: "q2", question: "多选？", multiSelect: true, options: [{ label: "X" }] }) as any;
     const elements = card.body.elements as Array<Record<string, unknown>>;
     const tags = elements.map((e) => e.tag);
     expect(tags).not.toContain("note");
-    expect(elements[elements.length - 1].tag).toBe("form");
+    expect(tags).not.toContain("form");
   });
 
-  it("无选项卡片：无 note，提示 + 反馈框（★ M4-R4 现象 2）", () => {
+  it("无选项卡片：无 note 无 form（★ M4-R4 现象 2 修复保留 + 灾难回退）", () => {
     const card = buildQuestionCard({ id: "q3", question: "自由回答？" }) as any;
     const elements = card.body.elements as Array<Record<string, unknown>>;
     const tags = elements.map((e) => e.tag);
     expect(tags).not.toContain("note");
-    expect(elements[elements.length - 1].tag).toBe("form");
+    expect(tags).not.toContain("form");
   });
 
   it("✅ 已选择卡片：header 变 green，含 → 答案", () => {
@@ -241,63 +235,9 @@ describe("bridge 端到端（A1/A2/A3）", () => {
     expect(sendText).toHaveBeenCalledWith("oc_1", expect.stringContaining("⚠️"));
   });
 
-  it("onCardAction feedback 提交 → 自由文本作为 custom 答案（★ M4-R4 现象 3）", async () => {
-    const { bridge, updateCard } = makeBridge();
-    const ctx = makeCtx();
-    bridge.patchAsk(ctx);
-    const promise = (ctx.userQuestions as any).ask({
-      agent: { id: "feishu:oc_1:123:0" },
-      questions: [{ id: "q1", question: "选方案？", options: [{ label: "A" }, { label: "B" }] }],
-    });
-    await new Promise((r) => setTimeout(r, 0));
-    const consumed = bridge.onCardAction("oc_1", "feedback:q1", { free_text: "都不选，我自己来" });
-    expect(consumed).toBe(true);
-    await expect(promise).resolves.toEqual({ answers: [{ id: "q1", selected: [], custom: "都不选，我自己来" }] });
-    expect(updateCard).toHaveBeenCalled();
-  });
-
-  it("onCardAction feedback 空输入 → 提示重试 + 消费（★ M4-R4 现象 3）", async () => {
-    const { bridge, sendText } = makeBridge();
-    const ctx = makeCtx();
-    bridge.patchAsk(ctx);
-    void (ctx.userQuestions as any).ask({
-      agent: { id: "feishu:oc_1:123:0" },
-      questions: [{ id: "q1", question: "选？", options: [{ label: "A" }] }],
-    });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(bridge.onCardAction("oc_1", "feedback:q1", { free_text: "   " })).toBe(true);
-    expect(sendText).toHaveBeenCalledWith("oc_1", expect.stringContaining("⚠️"));
-  });
-
-  it("onCardAction feedback 未传 formValues → 提示 + 消费（值缺失兜底）", async () => {
-    const { bridge, sendText } = makeBridge();
-    const ctx = makeCtx();
-    bridge.patchAsk(ctx);
-    void (ctx.userQuestions as any).ask({
-      agent: { id: "feishu:oc_1:123:0" },
-      questions: [{ id: "q1", question: "选？", options: [{ label: "A" }] }],
-    });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(bridge.onCardAction("oc_1", "feedback:q1", undefined)).toBe(true);
-    expect(sendText).toHaveBeenCalled();
-  });
-});
-
-describe("extractFeedbackText（★ M4-R4 现象 3：form_values 自由文本提取）", () => {
-  it("优先 free_text 字段（trim）", () => {
-    expect(extractFeedbackText({ free_text: " 你好 " })).toBe("你好");
-  });
-  it("兼容 text/value 字段名", () => {
-    expect(extractFeedbackText({ text: "txt" })).toBe("txt");
-    expect(extractFeedbackText({ value: "val" })).toBe("val");
-  });
-  it("无 free_text → 任意第一个字符串字段兜底", () => {
-    expect(extractFeedbackText({ other: "任意" })).toBe("任意");
-  });
-  it("空/非对象 → 空串", () => {
-    expect(extractFeedbackText({})).toBe("");
-    expect(extractFeedbackText(undefined)).toBe("");
-    expect(extractFeedbackText("str")).toBe("");
+  it("onCardAction 非 answer: 前缀（feedback 已随 form 移除）→ 不消费", () => {
+    const { bridge } = makeBridge();
+    expect(bridge.onCardAction("oc_1", "feedback:q1")).toBe(false);
   });
 });
 
