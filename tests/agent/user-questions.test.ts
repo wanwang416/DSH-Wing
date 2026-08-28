@@ -141,8 +141,8 @@ describe("bridge 端到端（A1/A2/A3）", () => {
     restore();
   });
 
-  it("超时 30s → ASK_ABORTED，agent 不卡死（A2）", async () => {
-    const { bridge } = makeBridge({ timeoutMs: 10 });
+  it("超时（timeoutMs 到期）→ ASK_ABORTED + warn 留痕（★ R5.1：此前静默删 pending）", async () => {
+    const { bridge, logger } = makeBridge({ timeoutMs: 10 });
     const ctx = makeCtx();
     bridge.patchAsk(ctx);
     const p = (ctx.userQuestions as any).ask({
@@ -150,6 +150,7 @@ describe("bridge 端到端（A1/A2/A3）", () => {
       questions: [{ id: "q", question: "?" }],
     });
     await expect(p).rejects.toMatchObject({ code: ASK_ABORTED });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("提问待答窗口已超时"));
   });
 
   it("Web agent（非 feishu: 前缀）→ 转发原 ask（Web UI 不受影响）", async () => {

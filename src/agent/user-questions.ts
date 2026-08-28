@@ -197,6 +197,10 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
   function timeout(chatId: string, entry: PendingEntry): void {
     if (pending.get(chatId) !== entry) return;
     pending.delete(chatId);
+    // ★ R5.1：过期必须留痕——此前静默删除，用户稍后点击只看到 pendingKeys=[]，无法归因
+    deps.logger?.warn?.(
+      `提问待答窗口已超时（${timeoutMs}ms），pending 已清除：chat=${chatId} q=${entry.question.id}；用户稍后点击将走 steer 兜底`,
+    );
     entry.reject(new UserQuestionBridgeError("ask_user_question was aborted before the user answered", ASK_ABORTED));
   }
 

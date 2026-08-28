@@ -102,6 +102,9 @@ export function apply(ctx: any, rawConfig: unknown): void {
     sendText: (chatId, text) => sender.sendText(chatId, text),
     messageIdOf: messageIdOfRes,
     logger,
+    // ★ R5.1 根因修复：此前未传 timeoutMs → 内部默认 30s，用户稍晚点击按钮时 pending 已静默过期
+    //   （pendingKeys=[] → steer 兜底但 agent 已空闲 → 连续卡片中断，2026-08-28 真机坐实）
+    timeoutMs: cfg.turnTimeoutMs,
   });
   const disposeAskPatch = userQuestionBridge.patchAsk(ctx);
   const outbox = createOutbox({
