@@ -356,14 +356,14 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const batching = createBatching({
     onFlush: (chatId, items) => {
       // 合批到期：合并文本投给 dispatcher（构造合并事件）
-      // ★ M2 遗留修复：合批只发生在群聊（index.ts onMessage 群聊才 batching.add），chat_type 应为 group
+      // ★ M4 修复：chat_type 从 chatId 动态判断（oc_=群聊 group，否则单聊 p2p），不再硬编码 group
       const text = batching.merge(items);
       const last = items[items.length - 1];
       void dispatcher.handleEvent("im.message.receive_v1", {
         message: {
           message_id: last.messageId,
           chat_id: chatId,
-          chat_type: "group",
+          chat_type: chatId.startsWith("oc_") ? "group" : "p2p",
           message_type: "text",
           content: JSON.stringify({ text }),
         },
@@ -482,8 +482,30 @@ export function apply(ctx: any, rawConfig: unknown): void {
             break;
           }
         }
+        case "im.message.recalled_v1": {
+          // ★ M4 任务 6：消息撤回 → 停止该 chat 正在生成的 agent（非阻塞；无 agent 则跳过）
+          // chatIdOf() 覆盖 chat_id / chat.chat_id / operator.open_id；recalled 事件字段在 message.chat_id
+          const chatId = chatIdOf() ?? (d as any)?.message?.chat_id;
+          const msgId = d?.message?.message_id ?? d?.message_id ?? "?";
+          if (!chatId) {
+            logger.warn?.(`im.message.recalled_v1 取不到 chatId，跳过`);
+            break;
+          }
+          const handle = mapper?.get(chatId);
+          if (handle) {
+            try {
+              handle.cancel({ kind: "recalled" });
+              logger.info?.(`消息撤回 msg=${msgId} chat=${chatId} → 已停止 agent 生成`);
+            } catch (err) {
+              logger.warn?.(`消息撤回停止 agent 失败 chat=${chatId}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          } else {
+            logger.info?.(`消息撤回 msg=${msgId} chat=${chatId}（无进行中 agent，跳过）`);
+          }
+          break;
+        }
         default:
-          // reaction/recalled/read/bot_deleted：日志级响应（M2 验收 15）
+          // reaction/read/bot_deleted：日志级响应（M2 验收 15）
           logger.info?.(`事件 ${event} 收到（${JSON.stringify(d)?.slice(0, 120) ?? ""}）`);
           break;
       }
