@@ -108,7 +108,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
             });
             // 3) steer 注入（agent 正在运行 → next-step 边界消费）
             experience?.handleUserMessage(chatId, agent, value.label, message);
-            logger?.info?.(`card.action.trigger chat=${chatId} question=${value.questionId} option=${value.optionId} label=${value.label} → steer 注入成功`);
+            // ★ R5.1：日志必须诚实——此处只代表已提交，无法确认 agent 消费；agent 空闲时可能无人接（Q3 缺口，M5 插话方案处理）
+            logger?.info?.(`card.action.trigger chat=${chatId} question=${value.questionId} option=${value.optionId} label=${value.label} → steer 已提交（agent 空闲时不保证消费，见 M5）`);
           })().catch((err) => {
             logger?.warn?.(`card.action.trigger 处理失败: ${err instanceof Error ? err.message : String(err)}`);
           });
