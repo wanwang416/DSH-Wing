@@ -20,7 +20,7 @@ export interface EventHandlerDeps {
     getOrCreateAgent(chatId: string): Promise<WingAgentHandle>;
     get(chatId: string): WingAgentHandle | undefined;
   };
-  userQuestionBridge?: { onCardAction(chatId: string, actionName: string, formValues?: unknown): boolean };
+  userQuestionBridge?: { onCardAction(chatId: string, actionName: string): boolean };
   experience?: { handleUserMessage(chatId: string, agent: WingAgentHandle, text: string, message: unknown): string };
 }
 
@@ -83,16 +83,14 @@ export function createEventHandler(deps: EventHandlerDeps) {
             d.action?.name ??
             (d as any).event?.action?.value?.action ??
             (d as any).event?.action?.name;
-          // ★ M4-R4 现象 3：answer:（选项按钮）+ feedback:（卡片内反馈输入框提交）双前缀
-          if (!actionName || !(actionName.startsWith("answer:") || actionName.startsWith("feedback:"))) {
-            logger?.warn?.(`card.action.trigger: actionName 不匹配 answer:/feedback: 前缀，actionName=${actionName ?? "undefined"}`);
+          // answer: 前缀 = 提问卡片选项按钮（M4-R4 灾难回退：feedback:/form_values 已随 form 移除）
+          if (!actionName || !actionName.startsWith("answer:")) {
+            logger?.warn?.(`card.action.trigger: actionName 不匹配 answer: 前缀，actionName=${actionName ?? "undefined"}`);
             break;
           }
           logger?.info?.(`card.action.trigger: chatId=${chatId} actionName=${actionName}`);
-          // ★ M4-R4 现象 3：form 提交回调携带 action.form_values（{ input.name: 值 }），转发给提问桥
-          const formValues = d.action?.form_values ?? (d as any).event?.action?.form_values;
           // ★ M3 任务 1：先让提问桥 resolve 待答 Promise + 更新卡片"✅ 已选择"；已消费则不再 steer
-          if (userQuestionBridge?.onCardAction(chatId, actionName, formValues)) break;
+          if (userQuestionBridge?.onCardAction(chatId, actionName)) break;
           // value：schema 2.0 已经是对象 {action, questionId, optionId, label}
           const value = d.action?.value ?? (d as any).event?.action?.value ?? null;
           if (!value?.label) {

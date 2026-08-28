@@ -55,22 +55,23 @@ describe("createEventHandler（M4 提取重构）", () => {
     expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("取不到 chatId"));
   });
 
-  it("card.action：actionName 非 answer:/feedback: 前缀 → warn", () => {
+  it("card.action：actionName 非 answer: 前缀 → warn", () => {
     const { deps } = makeDeps();
     const onEvent = createEventHandler(deps as any);
     onEvent("card.action.trigger", { context: { open_chat_id: "oc_1" }, action: { value: { action: "other" } } });
-    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("不匹配 answer:/feedback: 前缀"));
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("不匹配 answer: 前缀"));
   });
 
-  it("card.action：feedback: 前缀 + form_values → onCardAction 转发自由文本（★ M4-R4 现象 3）", () => {
-    const onCardAction = vi.fn().mockReturnValue(true);
+  it("card.action：feedback: 前缀已随 form 灾难回退移除 → warn 拦截不转发", () => {
+    const onCardAction = vi.fn().mockReturnValue(false);
     const { deps } = makeDeps({ userQuestionBridge: { onCardAction } });
     const onEvent = createEventHandler(deps as any);
     onEvent("card.action.trigger", {
       context: { open_chat_id: "oc_1" },
       action: { value: { action: "feedback:q1" }, form_values: { free_text: "我的补充" } },
     });
-    expect(onCardAction).toHaveBeenCalledWith("oc_1", "feedback:q1", { free_text: "我的补充" });
+    expect(onCardAction).not.toHaveBeenCalled();
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("不匹配 answer: 前缀"));
   });
 
   it("card.action：提问桥已消费（onCardAction true）→ 不 steer", async () => {
