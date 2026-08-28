@@ -145,7 +145,14 @@ export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
         type: "primary",
         width: "fill",
         text: { tag: "plain_text", content: "提交反馈" },
-        behaviors: [{ type: "callback", value: { action: `feedback:${q.id}` } }],
+        // ★ M4-R4 修复（真机回归 300123）：form 内按钮必须声明表单事件，
+        //   否则飞书 400 `there is no submit button in the form container` → 整卡降级文本。
+        //   form_action(behavior: submit) = 绑定表单提交（回调带 action.form_values）；
+        //   callback = 携带识别用的 action 名（feedback:<qid>）。两者可并列（文档 JSON 示例）。
+        behaviors: [
+          { type: "form_action", behavior: "submit" },
+          { type: "callback", value: { action: `feedback:${q.id}` } },
+        ],
       },
     ],
   };
