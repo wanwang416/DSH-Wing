@@ -27,6 +27,7 @@ import { createMissedCompensation } from "./inbound/compensation.js";
 import { createBatching } from "./inbound/batching.js";
 import { createGroupPolicy } from "./inbound/group-policy.js";
 import { parseInboundMessage, type ParsedMessage } from "./inbound/parser.js";
+import { chatTypeOf } from "./inbound/chat-type.js";
 import { createDedupeStore } from "./inbound/dedup.js";
 import { createDispatcher } from "./inbound/dispatcher.js";
 import { sessionKey, createSessionMapper } from "./session/mapper.js";
@@ -363,7 +364,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
         message: {
           message_id: last.messageId,
           chat_id: chatId,
-          chat_type: chatId.startsWith("oc_") ? "group" : "p2p",
+          chat_type: chatTypeOf(chatId),
           message_type: "text",
           content: JSON.stringify({ text }),
         },
