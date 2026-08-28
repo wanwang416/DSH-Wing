@@ -120,7 +120,7 @@ describe("CardKit 流式打字机 + 三级降级链（B1/B2）", () => {
   it("CardKit create 失败 → 降级 inline sendCard（B2 一级）", async () => {
     const { card, sendCard, onFallback } = makeCard({ cardkit: true, createFails: true });
     await card.addTool("Bash", '{"command":"npm test"}');
-    vi.advanceTimersByTime(2000);
+    await vi.advanceTimersByTimeAsync(2000);
     await card.finalize("最终回答");
     expect(sendCard).toHaveBeenCalled(); // inline 卡片路径
     expect(onFallback).not.toHaveBeenCalled();

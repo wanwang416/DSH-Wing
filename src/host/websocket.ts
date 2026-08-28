@@ -1,7 +1,7 @@
 /**
  * 飞书 WS 长连接传输层（M1）
  *
- * - 事件注册：im.message.receive_v1（M1 只此一个，card.action.trigger 留 M3）
+ * - 事件注册：消息 + card 回调 + 撤回 + bot 进出群 + 表情（与 index.ts onEvent 对齐）
  * - 单实例锁（铁律 5）：锁目录记录持有者 PID，force kill 残留锁可被存活检查接管
  * - CLOSE frame（铁律 6）：stop 时先 ws.stop()（SDK 会发 CLOSE frame）再释放锁
  * - M1 不做连接自愈（supervisor 是 M2）
@@ -12,6 +12,13 @@ import { join } from "node:path";
 
 const EVENT_MESSAGE = "im.message.receive_v1";
 const EVENT_CARD_ACTION = "card.action.trigger";
+// ★ M4 返工：补齐 index.ts onEvent switch 中已处理但未注册的事件（recalled 必修 + 同类死代码）
+const EVENT_RECALLED = "im.message.recalled_v1";
+const EVENT_BOT_ADDED = "im.chat.member.bot.added_v1";
+const EVENT_P2P_ENTERED = "im.chat.access_event.bot_p2p_chat_entered_v1";
+const EVENT_REACTION = "im.message.reaction.created_v1";
+/** 全部订阅的事件：除消息外均走 onEvent（recalled/bot进出群/card 回调/reaction） */
+const SUBSCRIBED_EVENTS = [EVENT_MESSAGE, EVENT_CARD_ACTION, EVENT_RECALLED, EVENT_BOT_ADDED, EVENT_P2P_ENTERED, EVENT_REACTION];
 
 export interface TransportDeps {
   getClient(): {
@@ -161,8 +168,9 @@ export function createTransport(deps: TransportDeps) {
         return;
       }
       if (c.on) {
-        c.on(EVENT_MESSAGE, (data: unknown) => void handleEvent(EVENT_MESSAGE, data));
-        c.on(EVENT_CARD_ACTION, (data: unknown) => void handleEvent(EVENT_CARD_ACTION, data));
+        for (const ev of SUBSCRIBED_EVENTS) {
+          c.on(ev, (data: unknown) => void handleEvent(ev, data));
+        }
       }
       try {
         const bot = await c.getBotInfo?.();
