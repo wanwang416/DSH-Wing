@@ -78,4 +78,86 @@ describe("outbox", () => {
     await outbox.stop();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("同一 dedupeKey 重复 enqueue → 幂等不重发", async () => {
+    const dir = tmpDir();
+    const deliver = vi.fn().mockResolvedValue({ ok: true });
+    const outbox = createOutbox({ dir, deliver });
+    await outbox.start();
+    outbox.enqueue({
+      dedupeKey: "k-dedup",
+      chatId: "oc_1",
+      kind: "text",
+      payload: { kind: "text", text: "a" },
+    });
+    await sleep(100); // 第一次已发送完成，sentKeys 已记录
+    const id2 = outbox.enqueue({
+      dedupeKey: "k-dedup",
+      chatId: "oc_1",
+      kind: "text",
+      payload: { kind: "text", text: "a" },
+    });
+    expect(id2).toBe("k-dedup"); // 幂等：返回 dedupeKey，不新建 envelope
+    expect(deliver).toHaveBeenCalledTimes(1);
+    await outbox.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("deliver 返回 retryable:false → 立即 failed 离队", async () => {
+    const dir = tmpDir();
+    const deliver = vi.fn().mockResolvedValue({ ok: false, retryable: false, error: "fatal" });
+    const outbox = createOutbox({ dir, deliver, maxRetries: 5 });
+    await outbox.start();
+    outbox.enqueue({
+      dedupeKey: "k-fatal",
+      chatId: "oc_1",
+      kind: "text",
+      payload: { kind: "text", text: "x" },
+    });
+    await sleep(100);
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(outbox.failedCount()).toBe(1);
+    await outbox.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("可重试但持续失败到 maxRetries → failed 离队", async () => {
+    const dir = tmpDir();
+    const deliver = vi.fn().mockResolvedValue({ ok: false, retryable: true, error: "总是失败" });
+    const outbox = createOutbox({ dir, deliver, maxRetries: 3, retryDelayMs: 10 });
+    await outbox.start();
+    outbox.enqueue({
+      dedupeKey: "k-exhaust",
+      chatId: "oc_1",
+      kind: "text",
+      payload: { kind: "text", text: "x" },
+    });
+    await sleep(600);
+    expect(outbox.failedCount()).toBe(1);
+    await outbox.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("deliver 抛异常 → 延迟回队重试，最终成功", async () => {
+    const dir = tmpDir();
+    let n = 0;
+    const deliver = vi.fn().mockImplementation(async () => {
+      n += 1;
+      if (n < 3) throw new Error("crash");
+      return { ok: true };
+    });
+    const outbox = createOutbox({ dir, deliver, maxRetries: 5, retryDelayMs: 10 });
+    await outbox.start();
+    outbox.enqueue({
+      dedupeKey: "k-throw",
+      chatId: "oc_1",
+      kind: "text",
+      payload: { kind: "text", text: "x" },
+    });
+    await sleep(500);
+    expect(n).toBeGreaterThanOrEqual(3);
+    expect(outbox.pendingCount()).toBe(0);
+    await outbox.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
