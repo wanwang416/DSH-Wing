@@ -426,20 +426,28 @@ export function apply(ctx: any, rawConfig: unknown): void {
           // ★ 诊断日志：打印完整事件结构，定位"点击无响应"卡在哪一步
           logger.info?.(`card.action.trigger 收到事件 data=${JSON.stringify(d).slice(0, 1000)}`);
           try {
-            // 飞书事件 chat_id 可能在多个位置（不同客户端/SDK版本字段位置不同）
+            // ★ schema 2.0 card.action.trigger 标准路径（参考 dsh-im bridge.mjs onCardAction）：
+            //   chatId = event.context.open_chat_id
+            //   action = event.action.value.action
+            // 兼容旧路径（schema 1.0 / 不同 SDK 版本）
             const chatId =
+              (d as any).context?.open_chat_id ??
+              (d as any).open_chat_id ??
               (d as any).chat_id ??
               d?.chat?.chat_id ??
               (d as any).message?.chat_id ??
-              (d as any).open_chat_id ??
               (d as any).event?.open_chat_id ??
               (d as any).event?.chat_id;
             if (!chatId) {
               logger.warn?.(`card.action.trigger: 取不到 chatId，事件字段不匹配。可用键=${Object.keys(d).join(",")}`);
               break;
             }
-            // 提取 name → name 格式: answer:questionId:optionIdx（兼容 event 外层包装）
-            const actionName = d.action?.name ?? (d as any).event?.action?.name;
+            // action 名：schema 2.0 从 action.value.action 取，兼容旧版 action.name
+            const actionName =
+              d.action?.value?.action ??
+              d.action?.name ??
+              (d as any).event?.action?.value?.action ??
+              (d as any).event?.action?.name;
             if (!actionName || !actionName.startsWith("answer:")) {
               logger.warn?.(`card.action.trigger: actionName 不匹配 answer: 前缀，actionName=${actionName ?? "undefined"}`);
               break;
@@ -447,13 +455,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
             logger.info?.(`card.action.trigger: chatId=${chatId} actionName=${actionName}`);
             // ★ M3 任务 1：先让提问桥 resolve 待答 Promise + 更新卡片"✅ 已选择"；已消费则不再 steer
             if (userQuestionBridge.onCardAction(chatId, actionName)) break;
-            // value 兼容：schema 2.0 是对象，schema 1.0 是 JSON 字符串
-            const rawValue = d.action?.value ?? (d as any).event?.action?.value;
-            const value = rawValue
-              ? typeof rawValue === "string"
-                ? JSON.parse(rawValue)
-                : rawValue
-              : null;
+            // value：schema 2.0 已经是对象 {action, questionId, optionId, label}
+            const value = d.action?.value ?? (d as any).event?.action?.value ?? null;
             if (!value?.label) {
               logger.warn?.(`card.action.trigger: value 无 label，value=${JSON.stringify(value)}`);
               break;

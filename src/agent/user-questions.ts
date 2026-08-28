@@ -91,14 +91,17 @@ export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
     body.push({ tag: "note", elements: [{ tag: "plain_text", content: "请回复数字，多个用逗号分隔（如 1,3）" }] });
   } else {
     // 单选：每选项一个按钮（对齐基底 sendAskQuestionPrompt 单选分支 / onCardAction）
-    // ★ M3 真机修复：schema 2.0 不支持 {tag:"action"} 组件（飞书实测 200861
-    //   "unsupported tag action"），按钮必须平铺进 body.elements（飞书实测通过）
+    // ★ M3 根因修复：schema 2.0 按钮回调必须用 behaviors[{type:'callback',value}]，
+    //   旧版 name+value 字段在 schema 2.0 下不触发 card.action.trigger 事件（参考 dsh-im feishu-cards.mjs）
     actions = opts.map((o, i) => ({
       tag: "button",
       type: "default",
+      width: "fill",
       text: { tag: "plain_text", content: o.label },
-      name: `answer:${q.id}:${i}`,
-      value: JSON.stringify({ questionId: q.id, optionId: i, label: o.label }),
+      behaviors: [{
+        type: "callback",
+        value: { action: `answer:${q.id}:${i}`, questionId: q.id, optionId: i, label: o.label },
+      }],
     }));
     if (actions.length === 0) {
       body.push({ tag: "note", elements: [{ tag: "plain_text", content: "请直接回复你的答案" }] });
