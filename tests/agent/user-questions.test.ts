@@ -82,10 +82,10 @@ describe("提问卡片构建（对齐基底 sendAskQuestionPrompt / renderCardMa
     expect(sub[0].tag).toBe("input");
     expect(sub[0].name).toBe("free_text");
     expect(sub[1].tag).toBe("button");
-    // ★ M4-R4 真机回归修复：form 内按钮必须先声明 form_action submit（否则飞书 300123
-    //   无提交按钮 → 整卡 400 降级），再带 callback 识别 action
-    expect(sub[1].behaviors[0]).toMatchObject({ type: "form_action", behavior: "submit" });
-    expect(sub[1].behaviors[1]).toMatchObject({ type: "callback", value: { action: "feedback:q1" } });
+    // ★ M4-R4 真机两连回归：form 内按钮必须顶层 action_type: "form_submit"
+    //   （300123 无提交按钮 → 200621 behaviors form_action 不识别，最终定为官方字段）
+    expect(sub[1].action_type).toBe("form_submit");
+    expect(sub[1].behaviors[0]).toMatchObject({ type: "callback", value: { action: "feedback:q1" } });
   });
 
   it("多选卡片同样带反馈输入框，且无 note（★ M4-R4 现象 2+3）", () => {
