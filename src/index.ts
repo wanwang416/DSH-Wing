@@ -358,14 +358,16 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const batching = createBatching({
     onFlush: (chatId, items) => {
       // 合批到期：合并文本投给 dispatcher（构造合并事件）
-      // ★ M4 修复：chat_type 从 chatId 动态判断（oc_=群聊 group，否则单聊 p2p），不再硬编码 group
+      // ★ M4-R3 任务 4：chat_type 必须来自事件层真实值（BatchItem.chatType 透传）。
+      //   oc_ 前缀不能区分群聊/单聊（P2P 会话 chat_id 也是 oc_ 前缀，routes.json 实证），
+      //   chatTypeOf 仅作无真值时的兜底。
       const text = batching.merge(items);
       const last = items[items.length - 1];
       void dispatcher.handleEvent("im.message.receive_v1", {
         message: {
           message_id: last.messageId,
           chat_id: chatId,
-          chat_type: chatTypeOf(chatId),
+          chat_type: last.chatType ?? chatTypeOf(chatId),
           message_type: "text",
           content: JSON.stringify({ text }),
         },
@@ -388,7 +390,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
       }
       // ★ 关键修复：p2p 不做合批 → 插话能立即到达 handleInbound → steer 立即生效
       // （合批只为群聊设计：群聊里用户连续发多条短消息应合并；p2p 插话不能被吞）
-      if (msg.chatType === "group" && batching.add(msg.chatId, { messageId: msg.messageId, text: msg.text })) {
+      // ★ M4-R3 任务 4：携带事件层真实 chatType，合批 flush 透传（不再用前缀猜测）
+      if (msg.chatType === "group" && batching.add(msg.chatId, { messageId: msg.messageId, text: msg.text, chatType: msg.chatType })) {
         return; // 群聊已合并（窗口到期统一 flush）
       }
       // p2p 或群聊超限：立即处理

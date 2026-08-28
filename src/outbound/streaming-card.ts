@@ -236,8 +236,29 @@ export class StreamingCard {
     return { json: buildCardJson(md, streaming), degraded: true };
   }
 
-  private async ensureCreated(): Promise<boolean> {
-    if (this.messageId) return true;
+  /**
+   * ★ M4-R3 任务 1：单飞保护——并发 N 路调用 ensureCreated 只产生 1 次真实创建。
+   * 根因：原实现只有 `if (this.messageId) return true` 守卫，而 messageId 在
+   * cardkit.create() **返回后**才赋值；patchAnswer（打字机定时）与
+   * addTool/addThinking → schedulePatch → patchFull 是两条独立触发线，
+   * 首次激活几乎同时通过守卫 → 并发两次 cardkit.create → 同屏两张同内容卡片。
+   * 修法：用 createPromise 记录进行中的创建，后续调用 await 同一 promise；
+   * 失败时 finally 清空，允许下一轮重试。
+   */
+  private createPromise: Promise<boolean> | undefined;
+
+  private ensureCreated(): Promise<boolean> {
+    if (this.messageId) return Promise.resolve(true);
+    if (!this.createPromise) {
+      this.createPromise = this.doCreate().finally(() => {
+        this.createPromise = undefined;
+      });
+    }
+    return this.createPromise;
+  }
+
+  /** 实际创建卡片（CardKit 两步优先，失败降级 inline；创建失败置 failed 返回 false） */
+  private async doCreate(): Promise<boolean> {
     const initial = this.fullCardJson(true).json;
     // 1) CardKit 两步创建（打字机路径）
     if (this.deps.cardkit) {
