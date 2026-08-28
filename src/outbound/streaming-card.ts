@@ -397,11 +397,12 @@ export class StreamingCard {
     this.pendingThinking = true;
   }
 
-  /** 回答流式累积（text-delta）→ main_text 打字机 */
+  /** 回答流式累积（text-delta）→ main_text 打字机（★M4 恢复：patchAnswer 自带 1500ms/30字符节流；230020 限频根因是多工具连续调用，非回答流式） */
   async addText(delta: string): Promise<void> {
     if (this.failed) return;
     this.answer += delta;
-    this.schedulePatch();
+    // await 打字机：确保首个 delta 等到卡片创建完成；节流命中时立即返回不阻塞
+    await this.patchAnswer();
   }
 
   /** 工具调用步骤（tool/call）→ Tools 面板新增一行 */

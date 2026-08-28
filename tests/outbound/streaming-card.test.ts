@@ -70,8 +70,9 @@ describe("StreamingCard 分行 + 状态（C1）", () => {
   it("addTool → Tools panel 加一行；setToolResult → ✅", async () => {
     const { card, updateCard } = makeCard({ cardkit: true });
     await card.addTool("Bash", '{"command":"npm test"}');
-    vi.advanceTimersByTime(2000);
+    await vi.advanceTimersByTimeAsync(2000); // ★M4：schedulePatch 防抖 timer 触发 + 微任务 flush（patchFull#1: 🔧）
     await card.setToolResult("Bash");
+    await vi.advanceTimersByTimeAsync(2000); // ★M4：setToolResult 防抖 → patchFull#2: ✅
     const lastJson = updateCard.mock.calls.at(-1)![1];
     const parsed = JSON.parse(lastJson) as any;
     const tools = parsed.body.elements.find((e: any) => e.tag === "collapsible_panel");
@@ -83,24 +84,24 @@ describe("StreamingCard 分行 + 状态（C1）", () => {
   it("addTool 失败 → setToolResult(error) → ❌", async () => {
     const { card, updateCard } = makeCard({ cardkit: true });
     await card.addTool("Bash", '{"command":"npm test"}');
-    vi.advanceTimersByTime(2000);
+    await vi.advanceTimersByTimeAsync(2000); // ★M4：防抖 timer 触发 + flush
     await card.setToolResult("Bash", new Error("boom"));
+    await vi.advanceTimersByTimeAsync(2000); // ★M4：setToolResult 防抖 → patchFull(❌)
     const parsed = JSON.parse(updateCard.mock.calls.at(-1)![1]) as any;
     const tools = parsed.body.elements.find((e: any) => e.tag === "collapsible_panel");
     expect(tools.elements[0].text.content).toContain("❌");
   });
 
   it("addThinking → Reasoning panel（💭）", async () => {
-    // 防抖用真实 setTimeout，测试直接等 STREAM_INTERVAL_MS + 100ms
+    // ★M4 修复：thinkingTimeout 防抖用 fake timer 推进（含 Date.now）+ flush 微任务；updateCard 第 2 参数才是 cardJson
     const { card, updateCard } = makeCard({ cardkit: true });
     await card.addThinking("让我想想" + LONG);
-    // 等防抖执行完
-    await new Promise(resolve => setTimeout(resolve, STREAM_INTERVAL_MS + 100));
-    const parsed = JSON.parse((updateCard.mock.calls.at(-1)![0]) as any) as any;
+    await vi.advanceTimersByTimeAsync(STREAM_INTERVAL_MS + 100);
+    const parsed = JSON.parse(updateCard.mock.calls.at(-1)![1] as any) as any;
     const panels = parsed.body.elements.filter((e: any) => e.tag === "collapsible_panel");
     expect(panels[0].header.title.content).toContain("Reasoning");
     expect(panels[0].elements[0].text.content).toContain("💭");
-  }, 7000);
+  });
 });
 
 describe("CardKit 流式打字机 + 三级降级链（B1/B2）", () => {
@@ -145,7 +146,7 @@ describe("CardKit 流式打字机 + 三级降级链（B1/B2）", () => {
   it("无 cardkit → 纯 inline 全量更新（updateCard），不崩溃", async () => {
     const { card, sendCard, updateCard, stream } = makeCard({ cardkit: false });
     await card.addTool("Bash", '{"command":"npm test"}');
-    vi.advanceTimersByTime(2000);
+    await vi.advanceTimersByTimeAsync(2000); // ★M4：防抖 timer 触发 → patchFull → ensureCreated(inline) → updateCard
     expect(sendCard).toHaveBeenCalled(); // inline 创建
     expect(updateCard).toHaveBeenCalled(); // 全量更新
     expect(stream).not.toHaveBeenCalled();
