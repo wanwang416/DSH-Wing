@@ -158,6 +158,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const turnSupervisor = createTurnSupervisor({
     timeoutMs: cfg.turnTimeoutMs,
     onTimeout(key) {
+      // ★ M4 终审风险2：轮次超时 dispose agent 前先 abort pending，避免用户点按钮后 steer 注入失败
+      userQuestionBridge.abortByChatId(key, "turn_timeout");
       void mapper?.disposeAgentFor?.(key).catch(() => void 0);
     },
     logger,
@@ -523,6 +525,9 @@ export function apply(ctx: any, rawConfig: unknown): void {
     turnSupervisor.stop();
     await supervisor.stop(); // 内部先 transport.stop（CLOSE frame）
     await outbox.stop();
+    // ★ M4 终审风险2：桥停止前 abort 所有 pending，避免残留 Promise 悬挂
+    const aborted = userQuestionBridge.abortAll();
+    if (aborted > 0) logger.info?.(`桥停止：abort ${aborted} 个待答提问`);
     await mapper?.disposeAll();
     lifecycleStarted = false;
     logger.info?.("bridge stopped");

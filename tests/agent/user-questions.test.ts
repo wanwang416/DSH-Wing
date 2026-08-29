@@ -46,10 +46,14 @@ describe("提问卡片构建（对齐基底 sendAskQuestionPrompt / renderCardMa
     //   按钮平铺在 body.elements 尾部；回调必须用 behaviors[{type:'callback',value}]
     const elements = card.body.elements as Array<Record<string, unknown>>;
     const buttons = elements.filter((e) => e.tag === "button");
-    expect(buttons).toHaveLength(2);
+    // ★ M4 终审风险1：单选有选项时，底部加「自由输入」按钮 → 共3个按钮（2选项+1自由输入）
+    expect(buttons).toHaveLength(3);
     expect(buttons[0].behaviors[0].value.action).toBe("answer:q1:0");
     expect(buttons[1].behaviors[0].value.action).toBe("answer:q1:1");
     expect(buttons[0].behaviors[0].value.label).toBe("A");
+    // 自由输入按钮：action=free_text:qid，type=primary
+    expect(buttons[2].behaviors[0].value.action).toBe("free_text:q1");
+    expect(buttons[2].type).toBe("primary");
     expect(card.actions).toBeUndefined();
   });
 

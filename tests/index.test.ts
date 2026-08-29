@@ -194,6 +194,8 @@ vi.mock("../src/agent/user-questions.js", () => ({
     onTextInbound: vi.fn(() => h.nextTextInbound),
     onCardAction: vi.fn(() => false),
     patchAsk: vi.fn(() => h.disposeAsk),
+    abortByChatId: vi.fn(() => false),
+    abortAll: vi.fn(() => 0),
   })),
   messageIdOfRes: vi.fn(),
 }));
