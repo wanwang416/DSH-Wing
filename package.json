@@ -20,12 +20,12 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./cordis.patch.example.yml": "./cordis.patch.example.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
-    "cordis.patch.yml",
+    "cordis.patch.example.yml",
     "README.md",
     "LICENSE"
   ],
