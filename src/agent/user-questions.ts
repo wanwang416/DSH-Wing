@@ -59,7 +59,8 @@ interface PendingEntry {
   resolve: (ans: { id: string; selected: string[]; custom?: string }) => void;
   reject: (err: Error) => void;
   cardMessageId?: string;
-  mode: "card" | "text";
+  /** card=按钮卡片待答 / text=文本降级待答 / freeText=用户点了"自由输入"按钮，等待文本回答 */
+  mode: "card" | "text" | "freeText";
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -124,6 +125,19 @@ export function buildQuestionCard(q: PendingQuestion): Record<string, unknown> {
     if (actions.length === 0) {
       // ★ M4-R4 修复（现象 2）：note → markdown
       body.push({ tag: "markdown", content: "请直接回复你的答案" });
+    } else {
+      // ★ M4 终审风险1：单选有选项时，底部加「自由输入」按钮——用户不想选选项时可以打字回答
+      //   （Q3 输入缺口修复：callback 引导打字，对齐 M5-plan.md 候选项方案）
+      actions.push({
+        tag: "button",
+        type: "primary",
+        width: "fill",
+        text: { tag: "plain_text", content: "✏️ 我想自由输入" },
+        behaviors: [{
+          type: "callback",
+          value: { action: `free_text:${q.id}`, questionId: q.id, mode: "freeText" },
+        }],
+      });
     }
   }
 
@@ -150,6 +164,21 @@ export function buildAnsweredCard(q: PendingQuestion, answerText: string): Recor
   };
 }
 
+/** ★ M4 终审风险1：用户点了「自由输入」按钮后替换原卡片，提示直接打字回答 */
+export function buildFreeTextPromptCard(q: PendingQuestion): Record<string, unknown> {
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content: `✏️ ${q.header ?? "自由输入"}` }, template: "turquoise" },
+    body: {
+      elements: [
+        { tag: "markdown", content: `**${q.question}**${q.detail ? `\n\n${q.detail}` : ""}` },
+        { tag: "markdown", content: "请直接输入你的回答（发送后即提交），不想回答了可以发「停止」或「算了」。" },
+      ],
+    },
+  };
+}
+
 /** 降级文本提问（卡片发送失败时用） */
 export function buildQuestionText(q: PendingQuestion): string {
   const opts = q.options ?? [];
@@ -161,6 +190,27 @@ export function buildQuestionText(q: PendingQuestion): string {
     sb.push("", "请直接回复你的答案");
   }
   return sb.join("\n");
+}
+
+/**
+ * ★ M4 终审风险1：停止词检测（与 experience.ts handleUserMessage 的停止词表保持同步）。
+ * 提问 pending 期间用户发停止词 → onTextInbound 先 abort pending 再返回 false，
+ * 让消息继续走正常 handleUserMessage 流程，由 experience.ts 统一 agent.cancel()。
+ */
+export function isStopWord(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return (
+    t === "停" ||
+    t === "停止" ||
+    t === "stop" ||
+    t === "/stop" ||
+    t.includes("停下来") ||
+    t.includes("停一下") ||
+    t.includes("别说了") ||
+    t.includes("别写了") ||
+    t.includes("不要说了") ||
+    t === "算了"
+  );
 }
 
 /** 解析文本回复为选项（对齐基底 resolveAskQuestionAnswer：数字 / 逗号分隔 / 选项文字 / 自由文本） */
@@ -287,6 +337,25 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
      */
     onCardAction(chatId: string, actionName: string): boolean {
       deps.logger?.info?.(`onCardAction 进入: chatId=${chatId} actionName=${actionName} pendingSize=${pending.size}`);
+
+      // ★ M4 终审风险1：用户点了「自由输入」按钮 → 切换到 freeText 模式，更新卡片提示直接打字
+      if (actionName?.startsWith("free_text:")) {
+        const entry = pending.get(chatId);
+        if (!entry) {
+          deps.logger?.warn?.(`onCardAction free_text: pending 中找不到 chatId=${chatId}`);
+          return false;
+        }
+        entry.mode = "freeText";
+        // 重置计时器：用户主动交互后重新开始计时，避免刚切到自由输入就超时
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => timeout(chatId, entry), timeoutMs);
+        if (entry.cardMessageId) {
+          deps.updateCard(entry.cardMessageId, JSON.stringify(buildFreeTextPromptCard(entry.question))).catch(() => void 0);
+        }
+        deps.logger?.info?.(`提问已切换到自由输入模式: chat=${chatId} q=${entry.question.id}`);
+        return true;
+      }
+
       if (!actionName?.startsWith("answer:")) {
         deps.logger?.warn?.(`onCardAction: actionName 不以 answer: 开头，actionName=${actionName}`);
         return false;
@@ -323,8 +392,34 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
      * @returns true=已消费（index.ts 不再 steer 注入）
      */
     onTextInbound(chatId: string, text: string): boolean {
+      // ★ M4 终审风险1：停止词优先——提问 pending 期间用户发"停下来/别写了"等，
+      //   先 abort pending（清计时器+reject），再返回 false 让消息走正常 handleUserMessage，
+      //   由 experience.ts 统一 agent.cancel()。停止词表与 experience.ts 保持同步。
+      if (isStopWord(text)) {
+        if (pending.has(chatId)) {
+          this.abortByChatId(chatId, "user_stop");
+          deps.logger?.info?.(`提问 pending 期间收到停止词，已 abort 并放行消息：chat=${chatId} text="${text.slice(0, 30)}"`);
+        }
+        return false; // 不消费，让正常流程处理 agent.cancel
+      }
       const entry = pending.get(chatId);
       if (!entry) return false;
+
+      // ★ M4 终审风险1：freeText 模式（用户点了「自由输入」按钮）→ 直接接受文本作为 custom answer，不做选项解析
+      if (entry.mode === "freeText") {
+        const trimmed = text.trim();
+        if (!trimmed) {
+          deps.sendText(chatId, "请输入你的回答（空内容无法提交）").catch(() => void 0);
+          return true;
+        }
+        if (!resolveEntry(chatId, entry, [], trimmed)) return true;
+        if (entry.cardMessageId) {
+          deps.updateCard(entry.cardMessageId, JSON.stringify(buildAnsweredCard(entry.question, trimmed))).catch(() => void 0);
+        }
+        deps.logger?.info?.(`提问自由文本回答 chat=${chatId} q=${entry.question.id} → ${trimmed.slice(0, 50)}`);
+        return true;
+      }
+
       const ans = resolveTextAnswer(entry.question, text);
       if (ans.selected.length === 0 && ans.custom === undefined) {
         // 解析不出 → 提示重试，消费该消息避免污染 agent
@@ -338,6 +433,30 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
       }
       deps.logger?.info?.(`提问文本回答 chat=${chatId} q=${entry.question.id} → ${shown}`);
       return true;
+    },
+
+    /**
+     * ★ M4 终审风险2：agent dispose/turnTimeout 时主动 abort 该 chat 的 pending，
+     * 避免用户稍后点击按钮时 steer 注入失败（agent 已不存在）。
+     * @returns true=有 pending 被 abort，false=该 chat 无 pending
+     */
+    abortByChatId(chatId: string, reason = "agent_disposed"): boolean {
+      const entry = pending.get(chatId);
+      if (!entry) return false;
+      if (entry.timer) clearTimeout(entry.timer);
+      pending.delete(chatId);
+      deps.logger?.info?.(`提问 pending 已主动 abort（${reason}）：chat=${chatId} q=${entry.question.id}`);
+      entry.reject(new UserQuestionBridgeError(`ask_user_question aborted: ${reason}`, ASK_ABORTED));
+      return true;
+    },
+
+    /** 桥停止时 abort 所有 pending（避免残留 Promise 悬挂） */
+    abortAll(): number {
+      let count = 0;
+      for (const chatId of [...pending.keys()]) {
+        if (this.abortByChatId(chatId, "bridge_stopped")) count++;
+      }
+      return count;
     },
   };
 }
