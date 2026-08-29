@@ -1,5 +1,5 @@
 /**
- * P0-2 命令三级分流测试（对齐  成熟桥接命令路由.ts 三级分流，注册制改进）
+ * P0-2 命令三级分流测试（对齐成熟桥接命令路由三级分流，注册制改进）
  *
  * 1. 桥命令（注册 Map）→ kind "bridge"
  * 2. DSH 注册命令（ctx.commands.find 命中）→ kind "dsh"
@@ -146,7 +146,7 @@ describe("createCommandRouter.route · 三级分流", () => {
 });
 
 describe("stripLeadingMentions", () => {
-  it("剥离开头 <at> 与 @ 提及（对齐基底 命令路由.ts:60）", () => {
+  it("剥离开头 <at> 与 @ 提及（对齐基底成熟桥接命令路由）", () => {
     expect(stripLeadingMentions("<at id=ou_1></at> /status")).toBe("/status");
     expect(stripLeadingMentions("@bot /status")).toBe("/status");
     expect(stripLeadingMentions("@bot  @bot2  /help")).toBe("/help");

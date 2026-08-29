@@ -262,7 +262,7 @@ describe("experience.handleUserMessage · V4 四类分类（interruptClassifierE
     agent.whenIdle = vi.fn(() => new Promise<void>((r) => { resolveIdle = r; }));
     const msg = { type: "user" };
     expect(ex.handleUserMessage("oc_1", agent, "为什么这样设计", msg)).toBe("queued");
-    expect(agent.followup).not.toHaveBeenCalled(); // 未 idle 前不补发（防卡 inbox，基底 成熟桥接:804）
+    expect(agent.followup).not.toHaveBeenCalled(); // 未 idle 前不补发（防卡 inbox，对齐基底成熟桥接实现）
     expect(agent.steer).not.toHaveBeenCalled();
     expect(agent.cancel).not.toHaveBeenCalled();
     resolveIdle(); // driver 收敛到 idle
@@ -357,7 +357,7 @@ describe("experience · C1 steer 排障日志可配置化（默认关闭）", ()
     cancel: vi.fn(),
     whenIdle: vi.fn(() => Promise.resolve()),
   });
-  it("配置 steerDiagLogPath → 触发分支写日志；未配置 → 不写（哈马收尾项：原写死 本地目录/wing/）", () => {
+  it("配置 steerDiagLogPath → 触发分支写日志；未配置 → 不写（哈马收尾项：原写死固定路径）", () => {
     const dir = mkdtempSync(join(tmpdir(), "wing-diag-"));
     const logPath = join(dir, "steer-diag.log");
     // 配置路径 → 写日志

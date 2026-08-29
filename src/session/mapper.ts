@@ -39,7 +39,7 @@ export function bumpGeneration(chatId: string): void {
   generations.set(chatId, (generations.get(chatId) ?? 0) + 1);
 }
 
-/** /new 对齐基底 rotate 语义：generation 归零（成熟桥接.ts:941 注释：fresh runNonce + generation 0 → 无碰撞新 id） */
+/** /new 对齐基底 rotate 语义：generation 归零（fresh runNonce + generation 0 → 无碰撞新 id） */
 export function resetGeneration(chatId: string): void {
   generations.set(chatId, 0);
 }

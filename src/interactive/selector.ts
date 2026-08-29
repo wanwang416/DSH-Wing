@@ -2,7 +2,7 @@
  * P1-2 通用单选卡框架（点按钮即切换，不弹打字）
  *
  * 三个命令复用：/mode /permission（权限单选卡）、/model（模型单选卡）、/preset（预设单选卡）。
- * 参考  成熟桥接presentation/cards.ts：modelCard（带 callback 按钮）+ button()/withButtons()。
+ * 参考成熟桥接实现卡片：modelCard（带 callback 按钮）+ button()/withButtons()。
  *
  * 结构（schema 2.0）：
  *   header.title + body.elements：
@@ -10,7 +10,7 @@
  *     - 每项一个 button：behaviors:[{type:"callback", value:{op:"<opPrefix>:<id>"}}]
  *       current 项 / broken 项 → disabled（防重复切换）
  *
- * ★ 关键坑（ 成熟桥接踩过）：回调回复的 dedupeKey 必须带唯一 token（card messageId），
+ * ★ 关键坑（成熟桥接踩过）：回调回复的 dedupeKey 必须带唯一 token（card messageId），
  *   否则同一张卡点两次第二次被 durableReply 去重吞掉、用户拿不到确认。
  */
 

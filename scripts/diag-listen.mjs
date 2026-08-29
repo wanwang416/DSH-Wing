@@ -4,9 +4,11 @@
  * 运行期间请 ALAN 从飞书给 dsh-wing bot 发一条消息。
  */
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import * as lark from "@larksuiteoapi/node-sdk";
 
-const yaml = readFileSync("本地目录/.credentials.yaml", "utf8");
+// 凭据文件位置：DSH_HOME 优先，兜底用户主目录（不硬编码本机路径）
+const yaml = readFileSync(`${process.env.DSH_HOME ?? homedir()}/.credentials.yaml`, "utf8");
 const m = yaml.match(/WING_LARK_APP:\s*'([^']+)'/);
 if (!m) {
   console.log("NO WING_LARK_APP");

@@ -47,7 +47,7 @@ export interface WingConfig {
    */
   interruptClassifierEnabled: boolean;
   /**
-   * steer 排障日志路径（C1 收尾项：原写死 `本地目录/wing/steer-diag.log` 且每轮都写）。
+   * steer 排障日志路径（C1 收尾项：原写死固定路径且每轮都写）。
    * 默认 undefined = 关闭（零开销）；排障时在 config.json 配路径临时开启。
    */
   steerDiagLogPath?: string;

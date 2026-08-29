@@ -99,7 +99,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
   // M0 遗留：加载 marker（证明插件被 DSH 加载；非 DSH 环境忽略）
   try {
-    const home = process.env.DSH_HOME ?? "本地目录";
+    const home = process.env.DSH_HOME ?? homedir();
     writeFileSync(join(home, ".dsh-wing-loaded"), `loaded at ${new Date().toISOString()}\n`, { mode: 0o600 });
   } catch {
     // 忽略
@@ -271,7 +271,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
   };
 
   // 单选卡回调路由（依赖 runtime/modelRegistry/rotateSession/reply，须在 event-handler 之前创建）
-  // ★ 回执 dedupeKey 带 Date.now() 唯一 token——同一张卡点两次不被 durableReply 去重吞（ 成熟桥接踩坑）
+  // ★ 回执 dedupeKey 带 Date.now() 唯一 token——同一张卡点两次不被 durableReply 去重吞（成熟桥接踩坑）
   const interactiveRouter = createInteractiveRouter({
     runtime: {
       getPermissionMode: () => runtime.permissionMode,
@@ -319,13 +319,13 @@ export function apply(ctx: any, rawConfig: unknown): void {
     approvalBridge.answer(req, next),
   );
 
-  // ---------- P0-2 命令系统（注册制三级分流，对齐基底  成熟桥接命令路由） ----------
+  // ---------- P0-2 命令系统（注册制三级分流，对齐基底成熟桥接命令路由） ----------
   // 注册制：新增桥命令 = 定义 BridgeCommandDef + 注册进 bridgeCommands（P0-3 填 /stop /new 等）
   const bridgeCommands = new Map<string, BridgeCommandDef>();
   // 桥命令可用服务（supervisor 等延迟就绪的对象在注册区赋值；runCommand 调用时已就绪）
   let commandServices: BridgeCommandContext["services"] | undefined;
   // DSH 命令服务薄封装（真实 API：@deepseek-ai/dsh-commands CommandRuntime。
-  // execute(agent, line, images, signal)，images 传空数组——当前 SDK 签名，勿沿用  成熟桥接旧 3 参）
+  // execute(agent, line, images, signal)，images 传空数组——当前 SDK 签名，勿沿用既有桥接旧 3 参）
   const dshCommandService: DshCommandService = {
     find(agent, name) {
       try {
@@ -362,7 +362,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     const cmdName = routed.kind === "bridge" ? routed.command.name : routed.name;
     let reply: string | undefined;
     let replyCard: Record<string, unknown> | undefined;
-    let doneReaction = routed.kind === "bridge"; // 桥命令执行成功打 DONE（对齐基底 命令路由.ts:90-100）
+    let doneReaction = routed.kind === "bridge"; // 桥命令执行成功打 DONE（对齐基底成熟桥接命令路由）
     if (routed.kind === "bridge") {
       const res = await routed.command
         .run({ logger, services: commandServices }, routed.rawInput, msg)
@@ -765,7 +765,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
         return undefined;
       }
     },
-    // /new 完整 rotate：对齐基底 成熟桥接.ts:941 注释（fresh runNonce + generation 0 → 无碰撞新 id）
+    // /new 完整 rotate：对齐基底成熟桥接实现（fresh runNonce + generation 0 → 无碰撞新 id）
     rotateSession,
     listCommands: () => [...bridgeCommands.values()].map(({ name, description }) => ({ name, description })),
     // P1-2 单选卡命令服务

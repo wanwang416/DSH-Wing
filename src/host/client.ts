@@ -132,7 +132,7 @@ export function buildLarkClient(opts: {
           opts.logger?.error?.(`ws start failed: ${err instanceof Error ? err.message : String(err)}`);
           // 排障：错误落盘（DSH_WING_SDK_LOG 未设置时默认路径）
           try {
-            appendFileSync(process.env.DSH_WING_SDK_LOG ?? "本地目录\\wing\\ws-error.log", `${new Date().toISOString()} ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+            appendFileSync(process.env.DSH_WING_SDK_LOG ?? "dsh-wing-ws-error.log", `${new Date().toISOString()} ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
           } catch {
             // 忽略
           }

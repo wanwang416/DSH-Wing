@@ -54,7 +54,7 @@ function makeDeps(ctx: any, overrides: Record<string, unknown> = {}) {
 describe("createAgent workspaceRoot 传递（M4 任务 4b）", () => {
   it("含空格路径完整传递：agents.create.meta.cwd 与 workspace attach cwd 都不被拆分", async () => {
     const { ctx, workspaceCreate, agentsCreate } = makeCtx();
-    const root = " 本地目录H"; // 含空格的真实 workspaceRoot（cordis.patch.yml 配置值）
+    const root = "D:\\My Workspace"; // 含空格的 workspaceRoot（配置值示例）
     await createAgent(makeDeps(ctx, { workspaceRoot: root }), "oc_1");
 
     // 1) session 的 meta.cwd 完整透传（含空格）
@@ -62,10 +62,10 @@ describe("createAgent workspaceRoot 传递（M4 任务 4b）", () => {
     const meta = agentsCreate.mock.calls[0][0].meta as { cwd: string; agentPreset: string };
     expect(meta.cwd).toBe(root);
 
-    // 2) workspace attach 收到完整 cwd + basename 完整（含空格，"本地目录" 不被拆成两段）
+    // 2) workspace attach 收到完整 cwd + basename 完整（含空格，"My Workspace" 不被拆成两段）
     expect(workspaceCreate).toHaveBeenCalledTimes(1);
     expect(workspaceCreate.mock.calls[0][0]).toBe(root);
-    expect(workspaceCreate.mock.calls[0][1]).toBe("本地目录");
+    expect(workspaceCreate.mock.calls[0][1]).toBe("My Workspace");
   });
 
   it("未传 workspaceRoot → 回退 process.cwd()", async () => {
@@ -142,15 +142,15 @@ describe("resumeAgent（重启恢复）", () => {
     const { ctx, workspaceCreate } = makeCtx();
     (ctx.agents as any).resume = vi.fn().mockImplementation(makeAgentResult);
     const handle = await resumeAgent(
-      makeDeps(ctx, { workspaceRoot: " 本地目录H" }),
+      makeDeps(ctx, { workspaceRoot: "D:\\My Workspace" }),
       "feishu:oc_2:abc:0",
     );
     expect((ctx.agents as any).resume).toHaveBeenCalledWith(
       expect.objectContaining({ resumeSessionId: "feishu:oc_2:abc:0" }),
     );
     // attachWorkspace 用 workspaceRoot（含空格完整），basename 不拆分
-    expect(workspaceCreate.mock.calls[0][0]).toBe(" 本地目录H");
-    expect(workspaceCreate.mock.calls[0][1]).toBe("本地目录");
+    expect(workspaceCreate.mock.calls[0][0]).toBe("D:\\My Workspace");
+    expect(workspaceCreate.mock.calls[0][1]).toBe("My Workspace");
     expect(handle.sessionId).toBe("feishu:oc_2:abc:0");
   });
 

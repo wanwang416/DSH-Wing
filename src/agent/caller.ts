@@ -89,7 +89,7 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
   const initialAgentOptions = sel ? { provider: live.provider, model: live.model } : undefined;
 
   const setup = async (agentCtx: any): Promise<void> => {
-    // 挂模型选择（live 对象：后续 mutate 即可换模型，无需重建会话——对齐  成熟桥接成熟桥接.ts:305-355）
+    // 挂模型选择（live 对象：后续 mutate 即可换模型，无需重建会话——对齐成熟桥接实现）
     if (sel) {
       try {
         installModelSelection(agentCtx, { current: sel, assembled: undefined });

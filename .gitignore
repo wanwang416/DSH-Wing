@@ -21,3 +21,7 @@ Thumbs.db
 
 # test coverage
 coverage/
+
+# local credentials & deployment config (never commit)
+.credentials.yaml
+cordis.patch.yml
