@@ -58,6 +58,8 @@ import { resumeCommand } from "./commands/resume.js";
 import { workspaceCommand } from "./commands/workspace.js";
 import { steerCommand } from "./commands/steer.js";
 import { setupCommand } from "./commands/setup.js";
+import { doctorCommand } from "./commands/doctor.js";
+import { createDoctorPackage, pluginVersion } from "./doctor/package.js";
 import type { ApprovalOutcome, ApprovalRequest } from "@deepseek-ai/dsh-user-approval";
 import type { SelectorItem } from "./interactive/selector.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
@@ -841,6 +843,13 @@ export function apply(ctx: any, rawConfig: unknown): void {
         return "no-agent";
       }
     },
+    // M4.2 /doctor 诊断包
+    doctor: {
+      generate: async () => {
+        const credential = await credStore.resolve(cfg.credentialRef);
+        return createDoctorPackage({ stateDir: dir, cfg, credential, pluginVersion: pluginVersion() });
+      },
+    },
   };
   bridgeCommands.set("stop", stopCommand);
   bridgeCommands.set("new", newCommand);
@@ -855,6 +864,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
   bridgeCommands.set("workspace", workspaceCommand);
   bridgeCommands.set("steer", steerCommand);
   bridgeCommands.set("setup", setupCommand);
+  bridgeCommands.set("doctor", doctorCommand);
 
   const startBridge = async (): Promise<void> => {
     if (lifecycleStarted) return;

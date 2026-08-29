@@ -80,6 +80,11 @@ export interface BridgeCommandServices {
   };
   /** P1-3：手动注入消息（/steer；running→steer，idle→followup；无 agent → no-agent） */
   steer?(chatId: string, text: string): Promise<"steered" | "queued" | "no-agent">;
+  /** M4.2 /doctor 诊断包：生成诊断 ZIP */
+  doctor?: {
+    /** 生成诊断包；返回 ZIP 路径与大小 */
+    generate(chatId: string): Promise<{ zipPath: string; size: number }>;
+  };
 }
 
 /** 桥命令定义（注册制：新命令 = 定义此对象 + 注册进 bridgeCommands Map） */
