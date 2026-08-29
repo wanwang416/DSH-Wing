@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { sessionKey, makeSessionId, bumpGeneration, resetRunNonce, createSessionMapper } from "../../src/session/mapper.js";
+import { sessionKey, makeSessionId, bumpGeneration, resetGeneration, resetRunNonce, createSessionMapper } from "../../src/session/mapper.js";
 
 describe("sessionKey（铁律 2：前缀隔离）", () => {
   it("格式为 feishu:<chatId>，绝不复用 Web GUI 会话", () => {
@@ -26,6 +26,20 @@ describe("sessionKey（铁律 2：前缀隔离）", () => {
     expect(id1).not.toBe(id0);
     resetRunNonce();
     expect(makeSessionId("oc_x")).toMatch(/^feishu:oc_x:[0-9a-f]{12}:1$/); // generation 保留，nonce 变
+  });
+
+  it("resetGeneration：/new 对齐基底 rotate——generation 归零（fresh runNonce + gen 0 → 无碰撞新 id）", () => {
+    resetRunNonce();
+    const id0 = makeSessionId("oc_y");
+    bumpGeneration("oc_y");
+    bumpGeneration("oc_y");
+    expect(makeSessionId("oc_y")).toMatch(/^feishu:oc_y:[0-9a-f]{12}:2$/); // gen 2
+    resetGeneration("oc_y");
+    expect(makeSessionId("oc_y")).toMatch(/^feishu:oc_y:[0-9a-f]{12}:0$/); // 归零
+    resetRunNonce(); // 对齐 rotate：mint fresh nonce + gen 归零 → 完全全新 id
+    const rotated = makeSessionId("oc_y");
+    expect(rotated).not.toBe(id0);
+    expect(rotated).toMatch(/^feishu:oc_y:[0-9a-f]{12}:0$/);
   });
 });
 

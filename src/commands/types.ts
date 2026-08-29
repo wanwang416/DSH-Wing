@@ -11,9 +11,45 @@ export type DshCommandResult =
   | { kind: "success"; text?: string }
   | { kind: "error"; text: string };
 
-/** 桥命令执行上下文（P0-3 具体命令按需扩展） */
+/**
+ * 桥命令执行上下文（P0-3 具体命令按需取用 services，全部可选——单测可只给被测命令用到的）
+ */
 export interface BridgeCommandContext {
   logger?: { info?(m: string): void; warn?(m: string): void; error?(m: string): void };
+  /** P0-3 注入的运行时服务（index.ts 组装时提供闭包，延迟到各对象就绪后） */
+  services?: BridgeCommandServices;
+}
+
+/** 桥命令可用服务（注册制命令需要什么就取什么，可选链安全） */
+export interface BridgeCommandServices {
+  /** 会话映射（/stop /new /status 用） */
+  mapper?: {
+    size(): number;
+    keys(): string[];
+    get(chatId: string): { status: string; cancel(cause: { kind: string }): void } | undefined;
+    disposeAgentFor(chatId: string): Promise<void>;
+  };
+  /** 路由持久化（/new 用：移除旧路由账目 → 下次全新创建） */
+  routeStore?: { remove(sessionKey: string): void };
+  /** 出站待发计数（/status 用） */
+  outbox?: { pendingCount(): number };
+  /** 入站 WAL 待消化计数（/status 用） */
+  inboundWal?: { pendingCount(): number };
+  /** 连接状态（/status 用，supervisor.state()） */
+  connection?: { state(): string };
+  /** 可变 runtime（/mode /permission /status 用） */
+  runtime?: {
+    getPermissionMode(): string;
+    /** 校验 + 设置；非法模式返回 false */
+    setPermissionMode(mode: string): boolean;
+    getAgentPreset(): string;
+  };
+  /** 当前模型（/status 用，动态读 agentDefaultModel.currentSelection） */
+  getModel?(): Promise<{ provider?: string; model?: string } | undefined>;
+  /** /new 完整 rotate（index.ts 提供：resetRunNonce + resetGeneration + dispose + route remove） */
+  rotateSession?(chatId: string): Promise<void>;
+  /** 已注册桥命令清单（/help 用） */
+  listCommands?(): Array<{ name: string; description: string }>;
 }
 
 /** 桥命令定义（注册制：新命令 = 定义此对象 + 注册进 bridgeCommands Map） */

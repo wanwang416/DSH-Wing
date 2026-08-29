@@ -41,6 +41,7 @@ function makeDeps() {
   const addReaction = vi.fn(() => Promise.resolve());
   const turnSupervisor = { arm: vi.fn(), disarm: vi.fn() };
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const onFollowupDropped = vi.fn();
   let cfg = baseCfg();
   return {
     sendText,
@@ -48,6 +49,7 @@ function makeDeps() {
     addReaction,
     turnSupervisor,
     logger,
+    onFollowupDropped,
     cfg: () => cfg,
     setCfg(c: WingConfig) {
       cfg = c;
@@ -307,14 +309,15 @@ describe("experience.handleUserMessage · V4 四类分类（interruptClassifierE
     await vi.waitFor(() => expect(agent.followup).toHaveBeenCalledWith(msg));
   });
 
-  it("C2：QUESTION running 且 whenIdle reject（agent 销毁）→ 丢弃不重投（防死循环）", async () => {
-    const { ex } = setup();
+  it("C2：QUESTION running 且 whenIdle reject（agent 销毁）→ 丢弃不重投 + onFollowupDropped 提示（豆包终审拍板）", async () => {
+    const { deps, ex } = setup();
     const agent = mkAgent("running");
     agent.whenIdle = vi.fn(() => Promise.reject(new Error("agent disposed")));
     expect(ex.handleUserMessage("oc_1", agent, "为什么", {})).toBe("queued");
     // 等微任务排空后确认不补发
     await new Promise((r) => setTimeout(r, 10));
     expect(agent.followup).not.toHaveBeenCalled();
+    expect(deps.onFollowupDropped).toHaveBeenCalledWith("oc_1", expect.stringContaining("question"));
   });
 
   it("COMMAND 停止词 running → cancel + stopped（不 followup）", () => {

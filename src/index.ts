@@ -31,7 +31,7 @@ import { chatTypeOf } from "./inbound/chat-type.js";
 import { createDedupeStore } from "./inbound/dedup.js";
 import { createDispatcher } from "./inbound/dispatcher.js";
 import { createEventHandler } from "./inbound/event-handler.js";
-import { sessionKey, createSessionMapper } from "./session/mapper.js";
+import { sessionKey, createSessionMapper, resetRunNonce, resetGeneration } from "./session/mapper.js";
 import { createRouteStore } from "./session/persistence.js";
 import { createSerialQueue } from "./session/serial.js";
 import { createAgent, resumeAgent, type WingAgentHandle } from "./agent/caller.js";
@@ -39,7 +39,13 @@ import { createForwarder } from "./agent/forwarder.js";
 import { createUserQuestionBridge, messageIdOfRes } from "./agent/user-questions.js";
 import { createExperience } from "./agent/experience.js";
 import { createCommandRouter } from "./commands/router.js";
-import type { BridgeCommandDef, DshCommandResult, DshCommandService } from "./commands/types.js";
+import type { BridgeCommandDef, BridgeCommandContext, DshCommandResult, DshCommandService } from "./commands/types.js";
+import { stopCommand } from "./commands/stop.js";
+import { newCommand } from "./commands/new.js";
+import { statusCommand } from "./commands/status.js";
+import { modeCommand } from "./commands/mode.js";
+import { permissionCommand } from "./commands/permission.js";
+import { helpCommand } from "./commands/help.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
 import { createSender } from "./outbound/sender.js";
 import { createOutbox } from "./outbound/outbox.js";
@@ -199,11 +205,29 @@ export function apply(ctx: any, rawConfig: unknown): void {
     turnSupervisor,
     cfg: () => cfg,
     logger,
+    onFollowupDropped: (chatId, label) => {
+      // ★ 豆包终审拍板：C2 补发钩子极端情况（会话销毁）→ 提示用户「会话已失效」
+      outbox.enqueue({
+        dedupeKey: `${sessionKey(chatId)}:followup-dropped:${label}:${Date.now()}`,
+        chatId,
+        kind: "text",
+        payload: { kind: "text", text: "⚠️ 会话已失效，你刚才的消息未能送达。发 /new 可开启新会话。" },
+      });
+    },
   });
+
+  // ---------- P0-3 runtime 可变状态（/mode 只对新消息生效：新建 agent 读 runtime） ----------
+  // 拍板：当前运行 agent 权限不变更，避免中途改权限安全漏洞
+  const runtime = {
+    permissionMode: cfg.permissionMode,
+    agentPreset: cfg.agentPreset,
+  };
 
   // ---------- P0-2 命令系统（注册制三级分流，对齐基底  成熟桥接命令路由） ----------
   // 注册制：新增桥命令 = 定义 BridgeCommandDef + 注册进 bridgeCommands（P0-3 填 /stop /new 等）
   const bridgeCommands = new Map<string, BridgeCommandDef>();
+  // 桥命令可用服务（supervisor 等延迟就绪的对象在注册区赋值；runCommand 调用时已就绪）
+  let commandServices: BridgeCommandContext["services"] | undefined;
   // DSH 命令服务薄封装（真实 API：@deepseek-ai/dsh-commands CommandRuntime。
   // execute(agent, line, images, signal)，images 传空数组——当前 SDK 签名，勿沿用  成熟桥接旧 3 参）
   const dshCommandService: DshCommandService = {
@@ -244,7 +268,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     let doneReaction = routed.kind === "bridge"; // 桥命令执行成功打 DONE（对齐基底 命令路由.ts:90-100）
     if (routed.kind === "bridge") {
       const res = await routed.command
-        .run({ logger }, routed.rawInput, msg)
+        .run({ logger, services: commandServices }, routed.rawInput, msg)
         .catch((err: unknown) => ({
           text: `⚠️ 命令执行失败: ${err instanceof Error ? err.message : String(err)}`,
         }));
@@ -314,8 +338,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const makeAgentDeps = () => ({
     ctx,
     workspaceRoot: cfg.workspaceRoot,
-    agentPreset: cfg.agentPreset,
-    permissionMode: cfg.permissionMode,
+    agentPreset: runtime.agentPreset,
+    permissionMode: runtime.permissionMode,
     onSessionEvent: (chatId: string, event: Parameters<typeof forwarder.onSessionEvent>[1]) =>
       forwarder.onSessionEvent(chatId, event),
     logger,
@@ -570,6 +594,56 @@ export function apply(ctx: any, rawConfig: unknown): void {
       }
     },
   });
+
+  // ---------- P0-3 命令注册（所有运行时对象已就绪） ----------
+  // 注册制：6 个桥命令只注册进 Map，不改路由核心。commandServices 闭包延迟到此时才可访问 supervisor。
+  const admService = ctx.get?.("agentDefaultModel");
+  commandServices = {
+    mapper: {
+      size: () => mapper?.size() ?? 0,
+      keys: () => mapper?.keys() ?? [],
+      get: (chatId) => {
+        const h = mapper?.get(chatId);
+        return h ? { status: h.status, cancel: (cause) => h.cancel(cause) } : undefined;
+      },
+      disposeAgentFor: (chatId) => (mapper?.disposeAgentFor(chatId) ?? Promise.resolve()),
+    },
+    routeStore: { remove: (key) => routeStore.remove(key) },
+    outbox: { pendingCount: () => outbox.pendingCount() },
+    inboundWal: { pendingCount: () => inboundWal.pendingCount() },
+    connection: { state: () => supervisor.state() },
+    runtime: {
+      getPermissionMode: () => runtime.permissionMode,
+      setPermissionMode: (mode) => {
+        if (mode !== "read-only" && mode !== "workspace-write" && mode !== "danger-full-access") return false;
+        runtime.permissionMode = mode;
+        return true;
+      },
+      getAgentPreset: () => runtime.agentPreset,
+    },
+    getModel: async () => {
+      try {
+        const cur = admService?.currentSelection?.();
+        return cur?.provider && cur.model ? { provider: cur.provider, model: cur.model } : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    // /new 完整 rotate：对齐基底 成熟桥接.ts:941 注释（fresh runNonce + generation 0 → 无碰撞新 id）
+    rotateSession: async (chatId) => {
+      await mapper?.disposeAgentFor(chatId); // dispose 旧 agent（内部 gen+1，随即归零）
+      resetRunNonce(); // mint fresh runNonce（换新家族，不撞旧日志）
+      resetGeneration(chatId); // gen 归零（对齐 rotate 语义）
+      routeStore.remove(sessionKey(chatId)); // 移除旧路由账目 → 下次 createAgent 全新创建
+    },
+    listCommands: () => [...bridgeCommands.values()].map(({ name, description }) => ({ name, description })),
+  };
+  bridgeCommands.set("stop", stopCommand);
+  bridgeCommands.set("new", newCommand);
+  bridgeCommands.set("status", statusCommand);
+  bridgeCommands.set("mode", modeCommand);
+  bridgeCommands.set("permission", permissionCommand);
+  bridgeCommands.set("help", helpCommand);
 
   const startBridge = async (): Promise<void> => {
     if (lifecycleStarted) return;
