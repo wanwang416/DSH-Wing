@@ -46,6 +46,11 @@ export interface WingConfig {
    * 命名走行为描述（interruptClassifierEnabled），不用版本号（interruptV4）——豆包拍板。
    */
   interruptClassifierEnabled: boolean;
+  /**
+   * steer 排障日志路径（C1 收尾项：原写死 `本地目录/wing/steer-diag.log` 且每轮都写）。
+   * 默认 undefined = 关闭（零开销）；排障时在 config.json 配路径临时开启。
+   */
+  steerDiagLogPath?: string;
 }
 
 export const DEFAULT_CONFIG: WingConfig = {

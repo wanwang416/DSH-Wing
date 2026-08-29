@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createExperience } from "../../src/agent/experience.js";
 import type { WingConfig } from "../../src/config/defaults.js";
 
@@ -343,6 +346,30 @@ describe("experience.handleUserMessage · V4 四类分类（interruptClassifierE
     const msg = { type: "user" };
     expect(ex.handleUserMessage("oc_1", agent, "给我讲个笑话", msg)).toBe("queued");
     expect(agent.followup).toHaveBeenCalledWith(msg);
+  });
+});
+
+describe("experience · C1 steer 排障日志可配置化（默认关闭）", () => {
+  const mkAgent = (status: string) => ({
+    status,
+    steer: vi.fn(),
+    followup: vi.fn(),
+    cancel: vi.fn(),
+    whenIdle: vi.fn(() => Promise.resolve()),
+  });
+  it("配置 steerDiagLogPath → 触发分支写日志；未配置 → 不写（哈马收尾项：原写死 本地目录/wing/）", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wing-diag-"));
+    const logPath = join(dir, "steer-diag.log");
+    // 配置路径 → 写日志
+    const { ex } = setup({ steerDiagLogPath: logPath });
+    ex.handleUserMessage("oc_1", mkAgent("running"), "停", {});
+    expect(readFileSync(logPath, "utf8")).toContain("[steer-diag]");
+    // 未配置（默认）→ 不写任何文件
+    const logPath2 = join(dir, "steer-diag2.log");
+    const { ex: ex2 } = setup(); // 不带 overCfg → cfg 无 steerDiagLogPath（默认关闭）
+    ex2.handleUserMessage("oc_1", mkAgent("running"), "停", {});
+    expect(existsSync(logPath2)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

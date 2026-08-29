@@ -13,52 +13,11 @@
 import type { WingConfig } from "../config/defaults.js";
 import { StreamingCard } from "../outbound/streaming-card.js";
 import { classifyInterrupt, InterruptType, isForwardWord, isRedirectWord } from "../inbound/interrupt-classify.js";
-
-/** 诊断日志：落盘 本地目录/wing/steer-diag.log（steer 真机排障用，问题定位后移除） */
-function diagLog(msg: string): void {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs = require("node:fs");
-    fs.appendFileSync("本地目录/wing/steer-diag.log", `${new Date().toISOString()} ${msg}\n`);
-  } catch {
-    // 忽略
-  }
-}
+import { appendFileSync } from "node:fs";
 
 export interface TurnSupervisorLike {
   arm(key: string): void;
   disarm(key: string): void;
-}
-
-/**
- * 安全 followup（★ C2 · 对齐基底  成熟桥接成熟桥接.ts:804-817 铁证）：
- * agent running 时 DSH 原生 followup 的 wakeup 请求不被 latch（会永久卡在 inbox），
- * 正确姿势是先 `await agent.whenIdle()` 等 driver 收敛到 idle 再 followup。
- * - running 且可 whenIdle → 异步补发（fire-and-forget，不阻塞调用方）；whenIdle 失败/agent 销毁 → 丢弃不重投（调 onDropped）
- * - 其余 → 直接 followup
- */
-function followupDeferred(
-  agent: { status: string; followup(message: unknown): void; whenIdle?(): Promise<void> },
-  message: unknown,
-  label: string,
-  onDropped?: () => void,
-): void {
-  if (agent.status === "running" && typeof agent.whenIdle === "function") {
-    void agent
-      .whenIdle()
-      .then(() => {
-        diagLog(`[steer-diag] ${label} 补发(followup after idle)`);
-        agent.followup(message);
-      })
-      .catch(() => {
-        diagLog(`[steer-diag] ${label} 补发丢弃(whenIdle 失败/agent 已销毁)`);
-        // 豆包终审拍板：极端情况（会话销毁）消息静默丢弃 → 回调提示用户「会话已失效」
-        onDropped?.();
-      });
-    return;
-  }
-  diagLog(`[steer-diag] ${label} 直接(followup)`);
-  agent.followup(message);
 }
 
 export interface ExperienceDeps {
@@ -83,6 +42,48 @@ export function createExperience(deps: ExperienceDeps) {
   const streams = new Map<string, StreamState>();
   /** chatId → 最近入站 messageId（reaction 目标） */
   const reactionTarget = new Map<string, string>();
+
+  /** 诊断日志（C1 收尾项：原写死 本地目录/wing/steer-diag.log 且每轮都写；现在从 cfg 读路径，默认关闭零开销） */
+  const diagLog = (msg: string): void => {
+    const path = deps.cfg().steerDiagLogPath;
+    if (!path) return;
+    try {
+      appendFileSync(path, `${new Date().toISOString()} ${msg}\n`);
+    } catch {
+      // 忽略
+    }
+  };
+
+  /**
+   * 安全 followup（★ C2 · 对齐基底  成熟桥接成熟桥接.ts:804-817 铁证）：
+   * agent running 时 DSH 原生 followup 的 wakeup 请求不被 latch（会永久卡在 inbox），
+   * 正确姿势是先 `await agent.whenIdle()` 等 driver 收敛到 idle 再 followup。
+   * - running 且可 whenIdle → 异步补发（fire-and-forget，不阻塞调用方）；whenIdle 失败/agent 销毁 → 丢弃不重投（调 onDropped）
+   * - 其余 → 直接 followup
+   */
+  const followupDeferred = (
+    agent: { status: string; followup(message: unknown): void; whenIdle?(): Promise<void> },
+    message: unknown,
+    label: string,
+    onDropped?: () => void,
+  ): void => {
+    if (agent.status === "running" && typeof agent.whenIdle === "function") {
+      void agent
+        .whenIdle()
+        .then(() => {
+          diagLog(`[steer-diag] ${label} 补发(followup after idle)`);
+          agent.followup(message);
+        })
+        .catch(() => {
+          diagLog(`[steer-diag] ${label} 补发丢弃(whenIdle 失败/agent 已销毁)`);
+          // 豆包终审拍板：极端情况（会话销毁）消息静默丢弃 → 回调提示用户「会话已失效」
+          onDropped?.();
+        });
+      return;
+    }
+    diagLog(`[steer-diag] ${label} 直接(followup)`);
+    agent.followup(message);
+  };
 
   const st = (chatId: string): StreamState => {
     let s = streams.get(chatId);

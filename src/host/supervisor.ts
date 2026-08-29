@@ -118,10 +118,13 @@ export function createConnectionSupervisor(deps: SupervisorDeps) {
     deps.status.update({ lastProbeAt: now(), lastProbeOk: ok, wsReady: deps.transport.wsReady() });
     if (ok) {
       probeFailStreak = 0;
-      // ★ 连接活性检测：probe OK 但长时间无 WS 事件（假死窗口）→ 主动重连
-      //   SDK watchdog 有 120s ping + 60s 超时；这里加速恢复（2 分钟无事件即重连）
+      // ★ 连接活性检测：probe OK + WS 未连接 + 长时间无事件 → 主动重连
+      //   （哈马 2026-08-29 收尾项：空闲会话无 WS 事件是正常现象（飞书不会主动推消息），
+      //   连接正常时不应触发重连——原逻辑每 30s tick 都报「疑似假死主动重连」噪音；
+      //   真断连由 probe 失败链 + SDK watchdog（120s ping）兜底。彻底删除该启发式属
+      //   P0-4 范畴，此处只修噪音不越界。）
       const lastEvent = deps.transport.lastEventAt?.() ?? now();
-      if (lastConnectedAt > 0 && now() - lastEvent > 120_000) {
+      if (lastConnectedAt > 0 && now() - lastEvent > 120_000 && !deps.transport.isConnected()) {
         setState("degraded", "长时间无 WS 事件，疑似连接假死，主动重连");
         await ensureConnected();
         return;

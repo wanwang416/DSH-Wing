@@ -141,15 +141,29 @@ describe("createConnectionSupervisor", () => {
     await s.stop();
   });
 
-  it("tick：probe ok 但长时间无 WS 事件 → 假死 degraded → 主动重连", async () => {
+  it("tick：probe ok + WS 未连接 + 长时间无事件 → 假死 degraded → 主动重连", async () => {
     const transport = makeTransport({
-      isConnected: vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true),
+      // start 时 false→true（连接成功）；tick 时兜底 false（WS 已断）
+      isConnected: vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true).mockReturnValue(false),
       lastEventAt: () => 0, // 从未收到事件
     });
     const { logger, s } = makeSupervisor({ transport });
     await s.start(); // 连接成功（设 lastConnectedAt）
-    await s.tick(); // probe ok + lastEvent=0 → 假死
+    await s.tick(); // probe ok + isConnected=false + 无事件 → 假死重连
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("假死"));
+    await s.stop();
+  });
+
+  it("tick：probe ok + WS 连接正常 + 空闲无事件 → 不触发假死重连（哈马收尾项：空闲会话无事件是正常现象）", async () => {
+    const transport = makeTransport({
+      isConnected: vi.fn().mockReturnValueOnce(false).mockReturnValue(true), // start 连上后始终连接正常
+      lastEventAt: () => 0, // 从未收到事件（空闲）
+    });
+    const { logger, s } = makeSupervisor({ transport });
+    await s.start(); // 连接成功
+    await s.tick(); // probe ok + isConnected=true + 无事件 → 不重连（修复前每 tick 都触发噪音）
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("假死"));
+    expect(s.state()).toBe("connected");
     await s.stop();
   });
 

@@ -39,6 +39,18 @@ describe("inbound WAL", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("pendingCount 只计未 delivered（哈马收尾项：原 records.size 把已处理完的也算进去，/status 虚高）", () => {
+    const dir = tmpDir();
+    const wal = createInboundWal({ dir, replayRetentionMs: 60_000, maxReplayAttempts: 2 });
+    wal.accept({ messageId: "m1", chatId: "oc_1", chatType: "p2p", text: "a" });
+    wal.accept({ messageId: "m2", chatId: "oc_1", chatType: "p2p", text: "b" });
+    wal.delivered("m1");
+    expect(wal.pendingCount()).toBe(1); // 只 m2 未 delivered
+    wal.delivered("m2");
+    expect(wal.pendingCount()).toBe(0); // 全部处理完 → 0
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("超过 maxReplayAttempts 不再重放", () => {
     const dir = tmpDir();
     const wal = createInboundWal({ dir, replayRetentionMs: 60_000, maxReplayAttempts: 2 });
