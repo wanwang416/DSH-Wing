@@ -1,13 +1,13 @@
 /**
  * P1-2 模型管理：per-chat live 对象 + GUI 默认同步（ALAN 拍板③）
  *
- * 核心机制（对齐  成熟桥接成熟桥接.ts:305-355）：`installModelSelection({current: liveObj})`
+ * 核心机制（对齐成熟桥接实现）：`installModelSelection({current: liveObj})`
  * 传 **live 对象**，mutate 后无需重建会话，下条回复自动用新模型。
  *
  * - `liveFor(chatId)`：该 chat 的 live 对象（override 优先，否则派生自 GUI 默认，惰性创建）
  * - `setOverride`：/model 手动切换 → mutate live（已存在 agent 生效）+ 持久化 override
  * - `setModelDefault`：GUI 切换 → 刷新**无 override** 的 live（follower 跟随），手动设置的会话不受影响
- * - 轮询：10s 读 `agentDefaultModel.currentSelection()`，sig 变化才触发（参考  成熟桥接index.ts:1587-1613）
+ * - 轮询：10s 读 `agentDefaultModel.currentSelection()`，sig 变化才触发（参考成熟桥接实现）
  */
 
 export interface ModelSel {

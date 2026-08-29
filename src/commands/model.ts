@@ -2,10 +2,10 @@
  * /model 切换模型（P1-2 · ALAN 拍板③：per-chat override，单聊生效）
  *
  * - 无参 → 发模型单选卡（provider/模型 列表，点选即切换，无需打字）
- * - 带参 → 文本切换 `/model <provider>/<model>`（兼容  成熟桥接用法）
+ * - 带参 → 文本切换 `/model <provider>/<model>`（兼容既有桥接用法）
  *
  * 机制：services.modelOverride.set → modelRegistry.setOverride（persist + mutate live 对象），
- * 下条回复自动用新模型，无需重建会话（对齐  成熟桥接 成熟桥接live entry）。
+ * 下条回复自动用新模型，无需重建会话（对齐成熟桥接实现 live entry）。
  */
 import type { BridgeCommandDef } from "./types.js";
 import { buildSelectorCard } from "../interactive/selector.js";

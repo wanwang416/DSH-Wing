@@ -1,5 +1,5 @@
 /**
- * P0-2 命令三级分流（★ 注册制，对齐基底  成熟桥接命令路由.ts）
+ * P0-2 命令三级分流（★ 注册制，对齐基底成熟桥接命令路由）
  *
  * 分流规则：
  *   1. `/xxx` ∈ bridgeCommands（注册 Map）→ bridge（桥自处理，打 DONE 表情）
@@ -26,7 +26,7 @@ export interface CommandRouterDeps {
   getAgent(chatId: string): { raw: unknown } | undefined;
 }
 
-/** 剥离开头 @ 提及（对齐基底  成熟桥接命令路由.ts:60） */
+/** 剥离开头 @ 提及（对齐基底成熟桥接实现） */
 export function stripLeadingMentions(text: string): string {
   let cur = text.trim();
   while (true) {
@@ -57,7 +57,7 @@ export function createCommandRouter(deps: CommandRouterDeps) {
       const bridge = deps.bridgeCommands.get(name);
       if (bridge) return { kind: "bridge", command: bridge, rawInput };
 
-      // Tier2：DSH 注册命令（对齐基底 命令路由.ts:118-119 懒解析 agent）
+      // Tier2：DSH 注册命令（对齐基底成熟桥接命令路由懒解析 agent）
       try {
         const agentEntry = deps.getAgent(msg.chatId);
         const agent = agentEntry?.raw;

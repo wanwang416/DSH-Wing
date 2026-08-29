@@ -1,0 +1,18 @@
+# dsh-wing — DSH 飞书原生插件 bundle patch（示例模板）
+# 用法：复制为 cordis.patch.yml 并填入你的配置。
+#   真实 cordis.patch.yml 含本机路径，不入库（见 .gitignore）。
+# 凭据：走 DSH 凭据系统（credentialRef: WING_LARK_APP），
+#   或用环境变量 DSH_WING_APP_ID / DSH_WING_APP_SECRET 覆盖。
+- insert:
+    - id: wing
+      name: 'dsh-wing'
+      config:
+        enabled: true
+        credentialRef: WING_LARK_APP
+        appId: !!js "process.env.DSH_WING_APP_ID ?? ''"
+        appSecret: !!js "process.env.DSH_WING_APP_SECRET ?? ''"
+        groupPolicy: mention
+        workspaceRoot: D:\path\to\your-workspace   # 替换为你的工作区（可含空格）
+        streaming:
+          enabled: true          # 默认开流式
+        permissionMode: workspace-write  # 默认保守（read-only / workspace-write / danger-full-access）

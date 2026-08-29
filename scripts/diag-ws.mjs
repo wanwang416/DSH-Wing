@@ -3,9 +3,11 @@
  * 从 .credentials.yaml 读 WING_LARK_APP 凭据（不硬编码），直接测 SDK WSClient。
  */
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import * as lark from "@larksuiteoapi/node-sdk";
 
-const yaml = readFileSync("本地目录/.credentials.yaml", "utf8");
+// 凭据文件位置：DSH_HOME 优先，兜底用户主目录（不硬编码本机路径）
+const yaml = readFileSync(`${process.env.DSH_HOME ?? homedir()}/.credentials.yaml`, "utf8");
 const m = yaml.match(/WING_LARK_APP:\s*'([^']+)'/);
 if (!m) {
   console.log("NO WING_LARK_APP credential");

@@ -1,5 +1,5 @@
 /**
- * /new 开启全新会话（对齐基底 成熟桥接.ts:941 rotate）
+ * /new 开启全新会话（对齐基底成熟桥接 rotate）
  *
  * 基底机制：rotate 必须 mint 全新 session id（fresh runNonce + generation 0），
  * 不能只 bump generation——`:gen+1` 会撞旧 runNonce 家族的持久化日志，DSH 首轮

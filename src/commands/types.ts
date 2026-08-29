@@ -1,7 +1,7 @@
 /**
- * P0-2 命令系统类型定义（注册制，对齐基底  成熟桥接 命令路由三级分流）
+ * P0-2 命令系统类型定义（注册制，对齐基底成熟桥接命令路由三级分流）
  *
- * 基底机制： 成熟桥接src/application/命令路由.ts（三级分流 + stripLeadingMentions）
+ * 基底机制：成熟桥接命令路由（三级分流 + stripLeadingMentions）
  * 改进：桥命令用注册制 Map（新增命令 = 加文件 + 注册，不改路由核心）。
  */
 import type { ParsedMessage } from "../inbound/parser.js";

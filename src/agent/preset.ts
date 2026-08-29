@@ -2,7 +2,7 @@
  * P1-2 preset 管理（ALAN 拍板①：读真实 roster + 兜底 4 档）
  *
  * 真实 roster：ctx.get("agentPresets").list()（shipped + 用户自定义，GUI 新建的 preset 也能用）。
- * 服务不可用/失败 → 兜底 SHIPPED_PRESETS（4 档出厂，对齐  成熟桥接成熟桥接.ts:107）。
+ * 服务不可用/失败 → 兜底 SHIPPED_PRESETS（4 档出厂，对齐成熟桥接实现）。
  */
 
 export interface PresetOption {

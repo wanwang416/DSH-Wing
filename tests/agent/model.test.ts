@@ -1,7 +1,7 @@
 /**
  * P1-2 模型管理测试（parse/formatModelSig + registry live 对象 + GUI sync 轮询）
  *
- * 核心断言：live 对象 mutate 后引用同一对象 → 已装 agent 下条回复即用新模型（对齐 成熟桥接）。
+ * 核心断言：live 对象 mutate 后引用同一对象 → 已装 agent 下条回复即用新模型（对齐成熟桥接实现）。
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { parseModelSig, formatModelSig, createModelRegistry, createModelSync } from "../../src/agent/model.js";

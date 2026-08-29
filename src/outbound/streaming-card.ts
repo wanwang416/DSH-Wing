@@ -1,10 +1,10 @@
 /**
  * StreamingCard — 单卡流式（★M2 前置 4：单卡流式呈现机制；★M3 任务 2：CardKit 打字机；★M3 任务 3：ToolStep 富卡片）
  *
- * 参考成熟桥接实现（本地目录\tools\既有桥接源码\）：
- * - core/streaming.go：StreamPreviewCfg（IntervalMs=1500, MinDeltaChars=30）+ ToolStep 结构
- * - platform/feishu/feishu.go：buildRichCardJSONBytes (6537) 多元素卡片 + richPanelElements (6453) 分行 + maxRichCardJSONBytes=28000 (6489)
- * - platform/feishu/feishu.go：StreamRichCardText (4637) CardKit 流式 PUT + createCardEntity (4594) + SendPreviewStart (4486)
+ * 参考成熟桥接实现（既有飞书桥接源码）：
+ * - streaming：StreamPreviewCfg（IntervalMs=1500, MinDeltaChars=30）+ ToolStep 结构
+ * - feishu card：多元素卡片 + 分行 + maxRichCardJSONBytes=28000 上限
+ * - feishu card：CardKit 流式 PUT + createCardEntity + SendPreviewStart
  *
  * 卡片结构（对齐基底 BuildRichCard）：
  *   header（状态色） + [Reasoning collapsible_panel] + [Tools collapsible_panel] + main_text（回答，element_id） + [footer]

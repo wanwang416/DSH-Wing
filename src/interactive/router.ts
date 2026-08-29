@@ -8,7 +8,7 @@
  *   approval:xxx               → P1-1 审批卡（预留，P1-1 实现）
  *
  * ★ 所有回执经 reply（outbox text），dedupeKey 由 index.ts 注入带唯一 token（卡片 messageId），
- *   同一张卡点两次不被去重吞（ 成熟桥接踩坑）。
+ *   同一张卡点两次不被去重吞（成熟桥接踩坑）。
  */
 
 import { parseOp } from "./selector.js";

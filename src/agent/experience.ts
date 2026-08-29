@@ -43,7 +43,7 @@ export function createExperience(deps: ExperienceDeps) {
   /** chatId → 最近入站 messageId（reaction 目标） */
   const reactionTarget = new Map<string, string>();
 
-  /** 诊断日志（C1 收尾项：原写死 本地目录/wing/steer-diag.log 且每轮都写；现在从 cfg 读路径，默认关闭零开销） */
+  /** 诊断日志（C1 收尾项：原写死固定路径且每轮都写；现在从 cfg 读路径，默认关闭零开销） */
   const diagLog = (msg: string): void => {
     const path = deps.cfg().steerDiagLogPath;
     if (!path) return;
@@ -55,7 +55,7 @@ export function createExperience(deps: ExperienceDeps) {
   };
 
   /**
-   * 安全 followup（★ C2 · 对齐基底  成熟桥接成熟桥接.ts:804-817 铁证）：
+   * 安全 followup（★ C2 · 对齐基底成熟桥接实现）：
    * agent running 时 DSH 原生 followup 的 wakeup 请求不被 latch（会永久卡在 inbox），
    * 正确姿势是先 `await agent.whenIdle()` 等 driver 收敛到 idle 再 followup。
    * - running 且可 whenIdle → 异步补发（fire-and-forget，不阻塞调用方）；whenIdle 失败/agent 销毁 → 丢弃不重投（调 onDropped）
@@ -258,7 +258,7 @@ export function createExperience(deps: ExperienceDeps) {
         case InterruptType.QUESTION:
         case InterruptType.CONFIRM: {
           // 疑问/确认 → 不打断主任务（★C2 安全 followup：running 时 whenIdle 后补发，
-          // 对齐基底 成熟桥接.ts:804-817——running 直接 followup 会卡 inbox）
+          // 对齐基底成熟桥接实现——running 直接 followup 会卡 inbox）
           followupDeferred(agent, message, `V4 ${type}`, () => deps.onFollowupDropped?.(chatId, `V4 ${type}`));
           diagLog(`[steer-diag] V4 ${type} 分支(queued): text="${text.slice(0, 30)}" status=${agent.status}`);
           return "queued";
