@@ -6,10 +6,10 @@
  * 提问走飞书交互式卡片；其余转发原 ask（Web UI 提问不受影响）。
  *
  * 参考成熟桥接实现：
- * - sendAskQuestionPrompt (core/engine.go:11546)：单选按钮 / 多选编号列表
- * - resolveAskQuestionAnswer (core/engine.go:3481)：数字 / 选项文字解析
- * - onCardAction askq 处理 (platform/feishu/feishu.go:817)：✅ 已选择卡片更新
- * - renderCardMap (platform/feishu/card.go:91)：飞书卡片结构（header.title 用 plain_text）
+ * - sendAskQuestionPrompt：单选按钮 / 多选编号列表
+ * - resolveAskQuestionAnswer：数字 / 选项文字解析
+ * - onCardAction askq 处理：✅ 已选择卡片更新
+ * - renderCardMap：飞书卡片结构（header.title 用 plain_text）
  */
 
 export interface QuestionOption {

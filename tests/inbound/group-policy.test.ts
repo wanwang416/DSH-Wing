@@ -18,7 +18,7 @@ function msg(overrides: Record<string, unknown> = {}) {
 function deps(overrides: Record<string, unknown> = {}) {
   return {
     policy: () => "open",
-    keywords: () => ["lark", "小斯"],
+    keywords: () => ["lark", "wing"],
     botOpenId: () => "ou_bot",
     logger: { info: vi.fn(), warn: vi.fn() },
     ...(overrides as any),

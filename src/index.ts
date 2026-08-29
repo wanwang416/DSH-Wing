@@ -619,7 +619,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
   // ---------- 群策略 + 合批 ----------
   const groupPolicy = createGroupPolicy({
     policy: () => cfg.groupPolicy,
-    keywords: () => (cfg as { groupKeywords?: string[] }).groupKeywords ?? ["lark", "小斯"],
+    keywords: () => (cfg as { groupKeywords?: string[] }).groupKeywords ?? ["lark", "wing"],
     botOpenId: () => transport.botOpenId(),
     logger,
   });

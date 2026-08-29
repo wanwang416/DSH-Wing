@@ -117,7 +117,7 @@ describe("stripMentions 剥离 @bot", () => {
   });
 
   it("@名字 剥离", () => {
-    expect(stripMentions("@小斯 早上好", [], "ou_bot")).toBe("早上好");
+    expect(stripMentions("@wing 早上好", [], "ou_bot")).toBe("早上好");
   });
 
   it("连续多个 <at> 全部剥离", () => {
@@ -125,12 +125,12 @@ describe("stripMentions 剥离 @bot", () => {
   });
 
   it("mentions 用 id/name 兜底", () => {
-    const p = parseInboundMessage(textMsg({ message: { mentions: [{ id: { open_id: "ou_bot" } }, { name: "小斯" }] } }));
-    expect(p!.mentions).toEqual(["ou_bot", "小斯"]);
+    const p = parseInboundMessage(textMsg({ message: { mentions: [{ id: { open_id: "ou_bot" } }, { name: "wing" }] } }));
+    expect(p!.mentions).toEqual(["ou_bot", "wing"]);
   });
 
   it("botOpenId 追加进提及目标", () => {
     // 提及列表不含 botOpenId，但 @名字匹配 open_id
-    expect(stripMentions("@小斯 hi", [], "ou_bot")).toBe("hi");
+    expect(stripMentions("@wing hi", [], "ou_bot")).toBe("hi");
   });
 });

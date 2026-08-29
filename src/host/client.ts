@@ -93,7 +93,7 @@ export function buildLarkClient(opts: {
   };
   const sdkClient = new lark.Client(clientOpts);
   const dispatcher = new lark.EventDispatcher({ loggerLevel: lark.LoggerLevel.error });
-  // ★ 禁用 SDK 默认 http 代理（同 成熟桥接实现 Line 3523）：
+  // ★ 禁用 SDK 默认 http 代理（同 成熟桥接实现）：
   //   环境有 127.0.0.1:10808 系统代理，axios 走代理会导致 connect config 拉取失败
   const dh = (lark as unknown as { defaultHttpInstance?: { defaults?: { proxy?: unknown } } }).defaultHttpInstance;
   if (dh?.defaults) dh.defaults.proxy = false;
@@ -165,7 +165,7 @@ export function buildLarkClient(opts: {
     },
     async updateMessage(params) {
       // StreamingCard 单卡流式：更新已发送的卡片消息
-      // ★ M3 真机修复：改用 PATCH（对齐基底 RefreshCard feishu.go:68 PatchMessageReq，
+      // ★ M3 真机修复：改用 PATCH（对齐基底 RefreshCard PatchMessageReq，
       //   仅传 content）。PUT /im/v1/messages/:id 对 interactive 消息实测不可用：
       //   带 msg_type=interactive → 230001 invalid；text → 230054 不支持；不带 → 99992402
       return sdkClient.im.message.patch({
@@ -174,7 +174,7 @@ export function buildLarkClient(opts: {
       });
     },
     // ★ M3 任务 2：CardKit 流式打字机（node-sdk 1.73 无封装 → 原始 HTTP）
-    // 参考成熟桥接 createCardEntity (feishu.go:4594) + StreamRichCardText (feishu.go:4637)
+    // 参考成熟桥接 createCardEntity + StreamRichCardText
     async createCardEntity(cardJson: string): Promise<string> {
       const res = (await sdkClient.request({
         url: "/open-apis/cardkit/v1/cards",
@@ -186,7 +186,7 @@ export function buildLarkClient(opts: {
       return cardId as string;
     },
     async streamMessageContent(cardId: string, content: string, sequence: number): Promise<unknown> {
-      // 基底 StreamRichCardText (feishu.go:4656) 仅传 content + sequence，勿加其他字段
+      // 基底 StreamRichCardText 仅传 content + sequence，勿加其他字段
       return sdkClient.request({
         url: `/open-apis/cardkit/v1/cards/${cardId}/elements/main_text/content`,
         method: "PUT",
