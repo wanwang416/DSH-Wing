@@ -1,7 +1,7 @@
 {
   "name": "dsh-wing",
   "version": "0.0.1",
-  "description": "DSH 飞书原生插件 — 过程透明 / 插话不打断 / 完整桥能力（M0 脚手架阶段）",
+  "description": "DSH 飞书原生插件 — 过程透明 / 插话不打断 / 完整桥能力（M4.1）",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -84,7 +84,7 @@ export function createSender(deps: SenderDeps) {
     /**
      * ★ M3 任务 2：CardKit 两步发送（createCardEntity → im.message.create 引用 card_id）。
      * 返回 { messageId, cardId }；cardId 用于后续流式打字机更新。
-     * 参考成熟桥接 SendPreviewStart (feishu.go:4511-4513)。
+     * 参考成熟桥接 SendPreviewStart。
      */
     async sendCardKitCard(chatId: string, cardJson: string): Promise<{ messageId: string; cardId: string }> {
       const c = client();
