@@ -438,6 +438,38 @@ describe("index.ts apply 集成（M4 覆盖重构）", () => {
     await vi.waitFor(() => expect(h.wal.accept).toHaveBeenCalled());
   });
 
+  it("onMessage：群聊纯寒暄 → 意图桥过滤（不进 agent，WAL 消费）", async () => {
+    const ctx = makeCtx();
+    await startBridge(ctx);
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge started")));
+    await h.transportOpts.onMessage(groupMsg("om_c1", "你好"));
+    await vi.advanceTimersByTimeAsync(700); // 合批 flush
+    await vi.waitFor(() => expect(h.wal.accept).toHaveBeenCalled());
+    expect(h.wal.delivered).toHaveBeenCalled();
+    expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("群聊闲聊过滤"));
+    expect(ctx.logger.info).not.toHaveBeenCalledWith(expect.stringContaining("→ queued"));
+  });
+
+  it("onMessage：群聊寒暄但 @bot → 不过滤（进 agent 正常 queued）", async () => {
+    const ctx = makeCtx();
+    await startBridge(ctx);
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge started")));
+    const msg = groupMsg("om_c2", "你好") as any;
+    msg.message.mentions = [{ id: { open_id: "ou_bot" } }]; // parser 读 raw.message.mentions
+    await h.transportOpts.onMessage(msg);
+    await vi.advanceTimersByTimeAsync(700);
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("→ queued")));
+  });
+
+  it("onMessage：群聊任务消息（非寒暄）→ 正常进管线 queued", async () => {
+    const ctx = makeCtx();
+    await startBridge(ctx);
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge started")));
+    await h.transportOpts.onMessage(groupMsg("om_c3", "帮我看下这个文件"));
+    await vi.advanceTimersByTimeAsync(700);
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("→ queued")));
+  });
+
   it("onMessage：P2P 会话（oc_ 前缀 chatId）→ chat_type 用事件真值 p2p（M4-R3 任务 4，不误判 group）", async () => {
     const ctx = makeCtx();
     await startBridge(ctx);

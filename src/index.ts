@@ -9,7 +9,7 @@
  *       streaming.enabled 默认 true / permissionMode 默认 workspace-write
  */
 
-import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
@@ -53,6 +53,11 @@ import { createModelRegistry, createModelSync } from "./agent/model.js";
 import { listPresets, SHIPPED_PRESETS, type PresetOption } from "./agent/preset.js";
 import { createInteractiveRouter } from "./interactive/router.js";
 import { createApprovalBridge } from "./interactive/approval.js";
+import { classifyIntent, Intent } from "./agent/intent.js";
+import { resumeCommand } from "./commands/resume.js";
+import { workspaceCommand } from "./commands/workspace.js";
+import { steerCommand } from "./commands/steer.js";
+import { setupCommand } from "./commands/setup.js";
 import type { ApprovalOutcome, ApprovalRequest } from "@deepseek-ai/dsh-user-approval";
 import type { SelectorItem } from "./interactive/selector.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
@@ -487,6 +492,27 @@ export function apply(ctx: any, rawConfig: unknown): void {
     botOpenId: () => transport.botOpenId(),
     logger,
     async handleInbound(msg: ParsedMessage) {
+      // ★ P1-3 意图桥：群聊纯寒暄不触发 agent（未明确 @bot → 打 reaction + 消费 WAL，不建 session）
+      // p2p 永远不过滤（用户单独找 bot 必须有响应）；@bot 命中 = 用户明确点名，也不过滤
+      if (msg.chatType === "group") {
+        // 「点名」判定：@ 了任何人（含 @bot）→ 用户明确想引起注意，不过滤（保守防误吞）
+        const mentionedBot = msg.mentions.length > 0 || msg.rawText.includes("@");
+        if (classifyIntent(msg.text) === Intent.CHITCHAT && !mentionedBot) {
+          logger.info?.(`群聊闲聊过滤 chat=${msg.chatId} msg=${msg.messageId} text="${msg.text.slice(0, 30)}"`);
+          inboundWal.accept({
+            messageId: msg.messageId,
+            chatId: msg.chatId,
+            chatType: msg.chatType,
+            text: msg.text,
+            senderOpenId: msg.userId,
+          });
+          inboundWal.delivered(msg.messageId);
+          compensation.noteDelivered(msg.messageId);
+          status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
+          experience.onInbound(msg.chatId, msg.messageId);
+          return;
+        }
+      }
       // 0) 立即获取/创建 agent（不排队）
       const agent = await mapper!.getOrCreateAgent(msg.chatId);
       // ★ M3 任务 1：先检查是否为待答问题的文本回复（多选/降级/自由文本）→ 消费，不 steer 注入
@@ -628,7 +654,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
       // ★ 关键修复：p2p 不做合批 → 插话能立即到达 handleInbound → steer 立即生效
       // （合批只为群聊设计：群聊里用户连续发多条短消息应合并；p2p 插话不能被吞）
       // ★ M4-R3 任务 4：携带事件层真实 chatType，合批 flush 透传（不再用前缀猜测）
-      if (msg.chatType === "group" && batching.add(msg.chatId, { messageId: msg.messageId, text: msg.text, chatType: msg.chatType })) {
+      // ★ P1-3：@bot 消息跳过合批——点名应即时响应；也避免合批丢 mentions 导致意图桥误过滤
+      const botNow = transport.botOpenId();
+      const mentionedBot = msg.mentions.includes(botNow ?? "") || (botNow ? msg.rawText.includes(`@${botNow}`) : false);
+      if (msg.chatType === "group" && !mentionedBot && batching.add(msg.chatId, { messageId: msg.messageId, text: msg.text, chatType: msg.chatType })) {
         return; // 群聊已合并（窗口到期统一 flush）
       }
       // p2p 或群聊超限：立即处理
@@ -710,7 +739,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
       },
       disposeAgentFor: (chatId) => (mapper?.disposeAgentFor(chatId) ?? Promise.resolve()),
     },
-    routeStore: { remove: (key) => routeStore.remove(key) },
+    routeStore: {
+      remove: (key) => routeStore.remove(key),
+      get: (key) => routeStore.get(key), // P1-3 /resume：查历史 sessionId
+    },
     outbox: { pendingCount: () => outbox.pendingCount() },
     inboundWal: { pendingCount: () => inboundWal.pendingCount() },
     connection: { state: () => supervisor.state() },
@@ -770,6 +802,40 @@ export function apply(ctx: any, rawConfig: unknown): void {
       set: (chatId, sel) => modelRegistry.setOverride(chatId, sel),
       clear: (chatId) => modelRegistry.clearOverride(chatId),
     },
+    // P1-3 第二批命令服务（/resume /workspace /steer）
+    resumeSession: async (chatId) => {
+      const route = routeStore.get(sessionKey(chatId));
+      if (!route?.sessionId) return { resumed: false };
+      const handle = await mapper?.getOrCreateAgent(chatId); // 有 route → 自动 resume；已在内存 → 直接复用
+      return { resumed: true, sessionId: handle?.sessionId ?? route.sessionId };
+    },
+    workspace: {
+      get: () => cfg.workspaceRoot ?? process.cwd(),
+      set: (path) => {
+        try {
+          if (!existsSync(path) || !statSync(path).isDirectory()) return false;
+          cfg.workspaceRoot = path;
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    },
+    steer: async (chatId, text) => {
+      const handle = mapper?.get(chatId);
+      if (!handle) return "no-agent";
+      const message = createUserMessage({ content: [{ type: "text", text }], source: { kind: "user" } });
+      try {
+        if (handle.status === "running") {
+          handle.steer(message);
+          return "steered";
+        }
+        handle.followup(message);
+        return "queued";
+      } catch {
+        return "no-agent";
+      }
+    },
   };
   bridgeCommands.set("stop", stopCommand);
   bridgeCommands.set("new", newCommand);
@@ -779,6 +845,11 @@ export function apply(ctx: any, rawConfig: unknown): void {
   bridgeCommands.set("model", modelCommand);
   bridgeCommands.set("preset", presetCommand);
   bridgeCommands.set("help", helpCommand);
+  // P1-3 第二批命令
+  bridgeCommands.set("resume", resumeCommand);
+  bridgeCommands.set("workspace", workspaceCommand);
+  bridgeCommands.set("steer", steerCommand);
+  bridgeCommands.set("setup", setupCommand);
 
   const startBridge = async (): Promise<void> => {
     if (lifecycleStarted) return;
