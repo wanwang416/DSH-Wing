@@ -247,19 +247,24 @@ describe("experience.handleUserMessage · V4 四类分类（interruptClassifierE
     steer: vi.fn(),
     followup: vi.fn(),
     cancel: vi.fn(),
+    whenIdle: vi.fn(() => Promise.resolve()),
   });
 
-  it("QUESTION running → followup + queued（不 steer 不 cancel）★唤醒验证点1：单测验证 followup 调用", () => {
+  it("QUESTION running → whenIdle 后补发 followup + queued（★C2 不打断，忙完自动答）", async () => {
     const { ex } = setup();
+    let resolveIdle!: () => void;
     const agent = mkAgent("running");
+    agent.whenIdle = vi.fn(() => new Promise<void>((r) => { resolveIdle = r; }));
     const msg = { type: "user" };
     expect(ex.handleUserMessage("oc_1", agent, "为什么这样设计", msg)).toBe("queued");
-    expect(agent.followup).toHaveBeenCalledWith(msg);
+    expect(agent.followup).not.toHaveBeenCalled(); // 未 idle 前不补发（防卡 inbox，基底 成熟桥接:804）
     expect(agent.steer).not.toHaveBeenCalled();
     expect(agent.cancel).not.toHaveBeenCalled();
+    resolveIdle(); // driver 收敛到 idle
+    await vi.waitFor(() => expect(agent.followup).toHaveBeenCalledWith(msg));
   });
 
-  it("QUESTION idle → followup + queued", () => {
+  it("QUESTION idle → followup 直接 + queued（idle 无需补发）", () => {
     const { ex } = setup();
     const agent = mkAgent("idle");
     const msg = { type: "user" };
@@ -267,13 +272,17 @@ describe("experience.handleUserMessage · V4 四类分类（interruptClassifierE
     expect(agent.followup).toHaveBeenCalledWith(msg);
   });
 
-  it("CONFIRM running → followup + queued（不打断主任务）", () => {
+  it("CONFIRM running → whenIdle 后补发 followup + queued（不打断主任务）", async () => {
     const { ex } = setup();
+    let resolveIdle!: () => void;
     const agent = mkAgent("running");
+    agent.whenIdle = vi.fn(() => new Promise<void>((r) => { resolveIdle = r; }));
     const msg = { type: "user" };
     expect(ex.handleUserMessage("oc_1", agent, "你确定", msg)).toBe("queued");
-    expect(agent.followup).toHaveBeenCalledWith(msg);
+    expect(agent.followup).not.toHaveBeenCalled();
     expect(agent.steer).not.toHaveBeenCalled();
+    resolveIdle();
+    await vi.waitFor(() => expect(agent.followup).toHaveBeenCalledWith(msg));
   });
 
   it("ORDINARY 纯确认词（好的）running → 仅回执：不 followup 不 steer + queued", () => {
@@ -285,13 +294,27 @@ describe("experience.handleUserMessage · V4 四类分类（interruptClassifierE
     expect(agent.cancel).not.toHaveBeenCalled();
   });
 
-  it("ORDINARY 推进词（继续）running → followup + queued（豆包细分：必须注入）", () => {
+  it("ORDINARY 推进词（继续）running → whenIdle 后补发 followup + queued（豆包细分：必须注入）", async () => {
     const { ex } = setup();
+    let resolveIdle!: () => void;
     const agent = mkAgent("running");
+    agent.whenIdle = vi.fn(() => new Promise<void>((r) => { resolveIdle = r; }));
     const msg = { type: "user" };
     expect(ex.handleUserMessage("oc_1", agent, "继续", msg)).toBe("queued");
-    expect(agent.followup).toHaveBeenCalledWith(msg);
+    expect(agent.followup).not.toHaveBeenCalled();
     expect(agent.steer).not.toHaveBeenCalled();
+    resolveIdle();
+    await vi.waitFor(() => expect(agent.followup).toHaveBeenCalledWith(msg));
+  });
+
+  it("C2：QUESTION running 且 whenIdle reject（agent 销毁）→ 丢弃不重投（防死循环）", async () => {
+    const { ex } = setup();
+    const agent = mkAgent("running");
+    agent.whenIdle = vi.fn(() => Promise.reject(new Error("agent disposed")));
+    expect(ex.handleUserMessage("oc_1", agent, "为什么", {})).toBe("queued");
+    // 等微任务排空后确认不补发
+    await new Promise((r) => setTimeout(r, 10));
+    expect(agent.followup).not.toHaveBeenCalled();
   });
 
   it("COMMAND 停止词 running → cancel + stopped（不 followup）", () => {

@@ -29,6 +29,11 @@ export interface CreateAgentDeps {
 export interface WingAgentHandle {
   agentId: string;
   sessionId: string;
+  /**
+   * DSH 原生 agent 对象（P0-2 命令路由 Tier2 需要：ctx.commands.find/execute 以
+   * 真实 Agent 为入参）。只读透传，不持有生命周期。
+   */
+  readonly rawAgent: any;
   /** 排队普通 turn（next-turn 边界） */
   followup(message: unknown): void;
   /** ★ 温和打断（next-step 边界消费，M0 Spike 7 核心发现） */
@@ -149,6 +154,7 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
   return {
     agentId: agent.id,
     sessionId,
+    rawAgent: agent,
     followup(message) {
       agent.followup(message);
     },
@@ -224,6 +230,7 @@ export async function resumeAgent(deps: CreateAgentDeps, sessionId: string): Pro
   return {
     agentId: agent.id,
     sessionId,
+    rawAgent: agent,
     followup(message) {
       agent.followup(message);
     },

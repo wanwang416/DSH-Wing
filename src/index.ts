@@ -38,6 +38,8 @@ import { createAgent, resumeAgent, type WingAgentHandle } from "./agent/caller.j
 import { createForwarder } from "./agent/forwarder.js";
 import { createUserQuestionBridge, messageIdOfRes } from "./agent/user-questions.js";
 import { createExperience } from "./agent/experience.js";
+import { createCommandRouter } from "./commands/router.js";
+import type { BridgeCommandDef, DshCommandResult, DshCommandService } from "./commands/types.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
 import { createSender } from "./outbound/sender.js";
 import { createOutbox } from "./outbound/outbox.js";
@@ -154,7 +156,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     addReaction: (messageId, emoji) => sender.addReaction(messageId, emoji),
     enabled: () => cfg.reactions.enabled,
   });
-  let mapper: ReturnType<typeof createSessionMapper> | undefined;
+  let mapper: ReturnType<typeof createSessionMapper<WingAgentHandle>> | undefined;
   const turnSupervisor = createTurnSupervisor({
     timeoutMs: cfg.turnTimeoutMs,
     onTimeout(key) {
@@ -199,6 +201,103 @@ export function apply(ctx: any, rawConfig: unknown): void {
     logger,
   });
 
+  // ---------- P0-2 命令系统（注册制三级分流，对齐基底  成熟桥接命令路由） ----------
+  // 注册制：新增桥命令 = 定义 BridgeCommandDef + 注册进 bridgeCommands（P0-3 填 /stop /new 等）
+  const bridgeCommands = new Map<string, BridgeCommandDef>();
+  // DSH 命令服务薄封装（真实 API：@deepseek-ai/dsh-commands CommandRuntime。
+  // execute(agent, line, images, signal)，images 传空数组——当前 SDK 签名，勿沿用  成熟桥接旧 3 参）
+  const dshCommandService: DshCommandService = {
+    find(agent, name) {
+      try {
+        return Boolean(ctx.commands?.find?.(agent, name));
+      } catch {
+        return false;
+      }
+    },
+    async execute(agent, line) {
+      try {
+        const out = await ctx.commands?.execute?.(agent, line, [], new AbortController().signal);
+        return out?.result as DshCommandResult | undefined;
+      } catch (err) {
+        return { kind: "error", text: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  };
+  const commandRouter = createCommandRouter({
+    bridgeCommands,
+    dsh: dshCommandService,
+    getAgent(chatId) {
+      const handle = mapper?.get(chatId);
+      return handle ? { raw: (handle as WingAgentHandle).rawAgent } : undefined;
+    },
+  });
+
+  /** 命令执行 + 收尾（桥命令 / DSH 命令统一走 WAL + 路由 + 回复 + DONE 表情） */
+  async function runCommand(
+    routed:
+      | { kind: "bridge"; command: BridgeCommandDef; rawInput: string }
+      | { kind: "dsh"; name: string; rawInput: string; line: string; agent: unknown },
+    msg: ParsedMessage,
+  ): Promise<void> {
+    const cmdName = routed.kind === "bridge" ? routed.command.name : routed.name;
+    let reply: string | undefined;
+    let doneReaction = routed.kind === "bridge"; // 桥命令执行成功打 DONE（对齐基底 命令路由.ts:90-100）
+    if (routed.kind === "bridge") {
+      const res = await routed.command
+        .run({ logger }, routed.rawInput, msg)
+        .catch((err: unknown) => ({
+          text: `⚠️ 命令执行失败: ${err instanceof Error ? err.message : String(err)}`,
+        }));
+      reply = res?.text;
+    } else {
+      // DSH 命令格式适配（哈马注意事项 3）：success→原文；error→⚠️ 前缀；无文本→提示已执行
+      const res = await dshCommandService.execute(routed.agent, routed.line);
+      if (res?.kind === "error") reply = `⚠️ ${res.text}`;
+      else if (res?.text) reply = res.text;
+      else reply = `命令 /${cmdName} 已执行（无文本输出）`;
+    }
+
+    // 收尾（对齐 handleInbound queued 分支的 WAL + 路由账目）
+    inboundWal.accept({
+      messageId: msg.messageId,
+      chatId: msg.chatId,
+      chatType: msg.chatType,
+      text: msg.text,
+      senderOpenId: msg.userId,
+    });
+    status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
+    experience.onInbound(msg.chatId, msg.messageId);
+    const key = sessionKey(msg.chatId);
+    const route = routeStore.get(key);
+    if (route) routeStore.touch(key, msg.messageId);
+    else {
+      routeStore.upsert({
+        sessionKey: key,
+        chatId: msg.chatId,
+        chatType: msg.chatType,
+        sessionId: mapper?.get(msg.chatId)?.sessionId ?? "",
+        updatedAt: Date.now(),
+      });
+    }
+    inboundWal.delivered(msg.messageId);
+    compensation.noteDelivered(msg.messageId);
+    status.refreshCounters({ inboundPending: inboundWal.pendingCount(), sessions: mapper?.size() ?? 0 });
+
+    // 命令回复（持久化 outbox，幂等 per 触发消息）
+    if (reply) {
+      outbox.enqueue({
+        dedupeKey: `${key}:cmd:${cmdName}:${msg.messageId}`,
+        chatId: msg.chatId,
+        kind: "text",
+        payload: { kind: "text", text: reply },
+      });
+    }
+    // DONE 表情
+    if (doneReaction && cfg.reactions.enabled) {
+      reactionManager.react(msg.messageId, cfg.reactions.done).catch(() => void 0);
+    }
+  }
+
   // ---------- 事件转发（7 种事件 → 体验） ----------
   const forwarder = createForwarder({
     onTurnStart: (chatId) => experience.onTurnStart(chatId),
@@ -222,7 +321,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     logger,
   });
 
-  mapper = createSessionMapper({
+  mapper = createSessionMapper<WingAgentHandle>({
     async createAgent(chatId: string): Promise<WingAgentHandle> {
       const key = sessionKey(chatId);
       const existing = routeStore.get(key);
@@ -283,7 +382,14 @@ export function apply(ctx: any, rawConfig: unknown): void {
         content: [{ type: "text", text: msg.text }],
         source: { kind: "user" },
       });
+      // 1.5) P0-2 命令路由（★ 先于四类分类：用户发 /stop 走命令分支，不被分类器误判成 COMMAND steer）
+      const routed = await commandRouter.route(msg.text, msg);
+      if (routed.kind === "bridge" || routed.kind === "dsh") {
+        await runCommand(routed, msg);
+        return;
+      }
       // 2) 立即调用 handleUserMessage → steer/stop 立即生效（和 DSH GUI 完全一致）
+      //    （routed.kind === "inject"：普通消息 / 未知命令 → 原样注入 Agent，不吞命令）
       const action = experience.handleUserMessage(msg.chatId, agent, msg.text, message);
       logger.info?.(`chat=${msg.chatId} 消息 ${msg.messageId} → ${action}`);
 
