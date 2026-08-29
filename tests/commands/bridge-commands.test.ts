@@ -99,11 +99,19 @@ describe("/status", () => {
 });
 
 describe("/mode", () => {
-  it("无参数 → 显示当前权限模式", async () => {
+  it("无参数 → 发权限单选卡（P1-2：当前项置灰 ✓）", async () => {
     const ctx = mkCtx({ services: { runtime: { getPermissionMode: () => "workspace-write", setPermissionMode: () => true, getAgentPreset: () => "code" } } });
     const res = await modeCommand.run(ctx, "", msg("/mode"));
-    expect(res?.text).toContain("当前权限模式");
-    expect(res?.text).toContain("工作区读写");
+    expect(res?.card).toBeDefined();
+    const card = res!.card!;
+    expect((card.header as any).title.content).toBe("🔐 切换权限模式");
+    const els = (card.body as any).elements as any[];
+    const buttons = els.slice(2) as any[];
+    expect(buttons).toHaveLength(3);
+    expect(buttons[0].behaviors[0].value.op).toBe("mode:read-only");
+    // 当前项（workspace-write）→ 置灰 ✓
+    expect(buttons[1].text.content).toBe("工作区读写 ✓");
+    expect(buttons[1].disabled).toBe(true);
   });
 
   it("非法参数 → 提示不吞 + 不调用 setPermissionMode", async () => {
@@ -132,13 +140,21 @@ describe("/mode", () => {
 });
 
 describe("/permission", () => {
-  it("显示当前模式 + 三级说明", async () => {
+  it("发权限单选卡 + 三级说明 + 当前项置灰（P1-2）", async () => {
     const ctx = mkCtx({ services: { runtime: { getPermissionMode: () => "read-only", setPermissionMode: () => true, getAgentPreset: () => "code" } } });
     const res = await permissionCommand.run(ctx, "", msg("/permission"));
-    expect(res?.text).toContain("当前权限模式");
-    expect(res?.text).toContain("只读");
-    expect(res?.text).toContain("完全访问（danger-full-access）");
-    expect(res?.text).toContain("/mode");
+    expect(res?.card).toBeDefined();
+    const card = res!.card!;
+    // 说明含三级 + 当前模式
+    const title = (card.body as any).elements[0].content as string;
+    expect(title).toContain("只读");
+    expect(title).toContain("danger-full-access");
+    // 按钮 opPrefix = permission
+    const buttons = (card.body as any).elements.slice(2) as any[];
+    expect(buttons[0].behaviors[0].value.op).toBe("permission:read-only");
+    // 当前项 read-only 置灰 ✓
+    expect(buttons[0].text.content).toBe("只读 ✓");
+    expect(buttons[0].disabled).toBe(true);
   });
 });
 

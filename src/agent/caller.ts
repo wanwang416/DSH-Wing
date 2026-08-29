@@ -23,6 +23,8 @@ export interface CreateAgentDeps {
   permissionMode: PermissionMode;
   /** 事件回调：chatId + 归一化 session 事件 */
   onSessionEvent(chatId: string, event: SessionEventOut): void;
+  /** P1-2：该 chat 的 live 模型对象（override 优先；installModelSelection 传引用 → mutate 即生效） */
+  getModelLive?(chatId: string): { provider: string; model: string };
   logger?: { warn?: (m: string) => void; info?: (m: string) => void };
 }
 
@@ -71,14 +73,23 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
   let sessionId = makeSessionId(chatId);
   const cwd = deps.workspaceRoot ?? process.cwd();
 
+  // P1-2 live 模型对象（override 优先，否则派生 GUI 默认；installModelSelection 传引用 → 切模型无需重建会话）
   // 当前 GUI 模型选择（DSH agent 必须有 provider/model，否则 turn 失败）
-  const admService = ctx.get?.("agentDefaultModel");
-  const cur = admService?.currentSelection?.();
-  const sel = cur?.provider && cur.model ? { provider: cur.provider, model: cur.model } : undefined;
+  // 双路径：有 getModelLive（P1-2 接线）用 live；否则回退 admService snapshot（旧行为/单测兼容）
+  let live: { provider: string; model: string };
+  if (deps.getModelLive) {
+    live = deps.getModelLive(chatId);
+  } else {
+    const admService = ctx.get?.("agentDefaultModel");
+    const cur = admService?.currentSelection?.();
+    live = cur?.provider && cur.model ? { provider: cur.provider, model: cur.model } : { provider: "", model: "" };
+  }
+  const sel = live.provider && live.model ? live : undefined;
   if (!sel) deps.logger?.warn?.("无模型选择——agent turn 可能失败");
+  const initialAgentOptions = sel ? { provider: live.provider, model: live.model } : undefined;
 
   const setup = async (agentCtx: any): Promise<void> => {
-    // 挂模型选择（agent 请求用 GUI 当前模型）
+    // 挂模型选择（live 对象：后续 mutate 即可换模型，无需重建会话——对齐  成熟桥接成熟桥接.ts:305-355）
     if (sel) {
       try {
         installModelSelection(agentCtx, { current: sel, assembled: undefined });
@@ -102,7 +113,7 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
     owned = await ctx.agents.create({
       sessionId,
       meta: { cwd, agentPreset: deps.agentPreset },
-      ...(sel ? { agentOptions: sel } : {}),
+      ...(initialAgentOptions ? { agentOptions: initialAgentOptions } : {}),
       setup,
     });
   } catch (err) {
@@ -111,7 +122,7 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
       try {
         owned = await ctx.agents.resume({
           resumeSessionId: sessionId,
-          ...(sel ? { agentOptions: sel } : {}),
+          ...(initialAgentOptions ? { agentOptions: initialAgentOptions } : {}),
           setup,
         });
       } catch (resumeErr) {
@@ -122,7 +133,7 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
         owned = await ctx.agents.create({
           sessionId,
           meta: { cwd, agentPreset: deps.agentPreset },
-          ...(sel ? { agentOptions: sel } : {}),
+          ...(initialAgentOptions ? { agentOptions: initialAgentOptions } : {}),
           setup,
         });
       }
@@ -180,10 +191,18 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
 /** 恢复历史 session（routes.json 有映射、重启后） */
 export async function resumeAgent(deps: CreateAgentDeps, sessionId: string): Promise<WingAgentHandle> {
   const { ctx } = deps;
-  // 当前 GUI 模型选择
-  const admService = ctx.get?.("agentDefaultModel");
-  const cur = admService?.currentSelection?.();
-  const sel = cur?.provider && cur.model ? { provider: cur.provider, model: cur.model } : undefined;
+  // P1-2 live 模型对象（chatId 从 sessionId 反推：feishu:<chatId>:...）
+  const chatIdOf = sessionId.startsWith("feishu:") ? sessionId.slice("feishu:".length).split(":")[0] ?? sessionId : sessionId;
+  let live: { provider: string; model: string };
+  if (deps.getModelLive) {
+    live = deps.getModelLive(chatIdOf);
+  } else {
+    const admService = ctx.get?.("agentDefaultModel");
+    const cur = admService?.currentSelection?.();
+    live = cur?.provider && cur.model ? { provider: cur.provider, model: cur.model } : { provider: "", model: "" };
+  }
+  const sel = live.provider && live.model ? live : undefined;
+  const initialAgentOptions = sel ? { provider: live.provider, model: live.model } : undefined;
   const setup = async (agentCtx: any): Promise<void> => {
     if (sel) {
       try {
@@ -202,7 +221,7 @@ export async function resumeAgent(deps: CreateAgentDeps, sessionId: string): Pro
   };
   const owned = await ctx.agents.resume({
     resumeSessionId: sessionId,
-    ...(sel ? { agentOptions: sel } : {}),
+    ...(initialAgentOptions ? { agentOptions: initialAgentOptions } : {}),
     setup,
   });
   if (!owned?.agent) throw new Error(`agents.resume 未返回 agent（sessionId=${sessionId}）`);
