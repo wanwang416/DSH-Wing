@@ -34,13 +34,14 @@ export interface TurnSupervisorLike {
  * 安全 followup（★ C2 · 对齐基底  成熟桥接成熟桥接.ts:804-817 铁证）：
  * agent running 时 DSH 原生 followup 的 wakeup 请求不被 latch（会永久卡在 inbox），
  * 正确姿势是先 `await agent.whenIdle()` 等 driver 收敛到 idle 再 followup。
- * - running 且可 whenIdle → 异步补发（fire-and-forget，不阻塞调用方）；whenIdle 失败/agent 销毁 → 丢弃不重投
+ * - running 且可 whenIdle → 异步补发（fire-and-forget，不阻塞调用方）；whenIdle 失败/agent 销毁 → 丢弃不重投（调 onDropped）
  * - 其余 → 直接 followup
  */
 function followupDeferred(
   agent: { status: string; followup(message: unknown): void; whenIdle?(): Promise<void> },
   message: unknown,
   label: string,
+  onDropped?: () => void,
 ): void {
   if (agent.status === "running" && typeof agent.whenIdle === "function") {
     void agent
@@ -51,6 +52,8 @@ function followupDeferred(
       })
       .catch(() => {
         diagLog(`[steer-diag] ${label} 补发丢弃(whenIdle 失败/agent 已销毁)`);
+        // 豆包终审拍板：极端情况（会话销毁）消息静默丢弃 → 回调提示用户「会话已失效」
+        onDropped?.();
       });
     return;
   }
@@ -67,6 +70,8 @@ export interface ExperienceDeps {
   turnSupervisor: TurnSupervisorLike;
   cfg: () => WingConfig;
   logger?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
+  /** ★ C2 补发钩子丢弃回调（豆包终审拍板）：whenIdle 失败/agent 销毁时通知用户「会话已失效」 */
+  onFollowupDropped?: (chatId: string, label: string) => void;
 }
 
 interface StreamState {
@@ -253,14 +258,14 @@ export function createExperience(deps: ExperienceDeps) {
         case InterruptType.CONFIRM: {
           // 疑问/确认 → 不打断主任务（★C2 安全 followup：running 时 whenIdle 后补发，
           // 对齐基底 成熟桥接.ts:804-817——running 直接 followup 会卡 inbox）
-          followupDeferred(agent, message, `V4 ${type}`);
+          followupDeferred(agent, message, `V4 ${type}`, () => deps.onFollowupDropped?.(chatId, `V4 ${type}`));
           diagLog(`[steer-diag] V4 ${type} 分支(queued): text="${text.slice(0, 30)}" status=${agent.status}`);
           return "queued";
         }
         case InterruptType.ORDINARY: {
           if (isForwardWord(text)) {
             // 推进词（继续/接着来/往下）→ followup 注入（豆包细分拍板：必须注入，否则任务卡死；running 时 whenIdle 后补发）
-            followupDeferred(agent, message, "V4 ORDINARY(推进)");
+            followupDeferred(agent, message, "V4 ORDINARY(推进)", () => deps.onFollowupDropped?.(chatId, "V4 ORDINARY(推进)"));
             diagLog(`[steer-diag] V4 ORDINARY(推进) 分支(queued): text="${text.slice(0, 30)}" status=${agent.status}`);
             return "queued";
           }
