@@ -497,7 +497,12 @@ export function apply(ctx: any, rawConfig: unknown): void {
       if (msg.chatType === "group") {
         // 「点名」判定：@ 了任何人（含 @bot）→ 用户明确想引起注意，不过滤（保守防误吞）
         const mentionedBot = msg.mentions.length > 0 || msg.rawText.includes("@");
-        if (classifyIntent(msg.text) === Intent.CHITCHAT && !mentionedBot) {
+        const intent = classifyIntent(msg.text);
+        // 诊断日志：寒暄消息无论是否放行都留痕（验收遗留——「你好」直通疑点需观察 mentions）
+        if (intent === Intent.CHITCHAT) {
+          logger.info?.(`群聊寒暄判定 chat=${msg.chatId} intent=${intent} mentionedBot=${mentionedBot} mentions=${msg.mentions.length} raw="${msg.rawText.slice(0, 40)}"`);
+        }
+        if (intent === Intent.CHITCHAT && !mentionedBot) {
           logger.info?.(`群聊闲聊过滤 chat=${msg.chatId} msg=${msg.messageId} text="${msg.text.slice(0, 30)}"`);
           inboundWal.accept({
             messageId: msg.messageId,
