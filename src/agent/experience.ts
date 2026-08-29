@@ -12,6 +12,7 @@
 
 import type { WingConfig } from "../config/defaults.js";
 import { StreamingCard } from "../outbound/streaming-card.js";
+import { classifyInterrupt, InterruptType, isForwardWord, isRedirectWord } from "../inbound/interrupt-classify.js";
 
 /** 诊断日志：落盘 本地目录/wing/steer-diag.log（steer 真机排障用，问题定位后移除） */
 function diagLog(msg: string): void {
@@ -154,10 +155,13 @@ export function createExperience(deps: ExperienceDeps) {
     },
 
     /**
-     * 插话/停止判定：
-     * - 停止词（含"停下来/停一下/别写了"等口语）→ cancel（立即停止）
-     * - agent running → steer（温和打断，next-step 边界消费）
-     * - agent idle → followup（排队）
+     * 插话/停止判定（P0-1 ★ 四类分类，受 `interruptClassifierEnabled` 开关控制）：
+     * - V4 开：COMMAND → cancel（停止/改道立即中断）；QUESTION/CONFIRM → followup（不打断主任务）；
+     *          ORDINARY 纯确认词 → 仅回执不注入；ORDINARY 推进词 → followup 注入；null → 原 steer/followup
+     * - V4 关：回退旧逻辑（停止词 cancel + running steer + idle followup）
+     *
+     * ★ QUESTION 唤醒验证点（豆包补充）：running 时 followup 是否自动在 turn 结束被处理，
+     *   单测只能验证「followup 被调用 + 返回 queued」；真机不唤醒则按计划 §二 补 turn/end 钩子。
      */
     handleUserMessage(
       chatId: string,
@@ -166,37 +170,91 @@ export function createExperience(deps: ExperienceDeps) {
       message: unknown,
     ): "stopped" | "steered" | "queued" {
       void chatId;
-      const t = text.trim().toLowerCase();
-      const isStop =
-        t === "停" ||
-        t === "停止" ||
-        t === "stop" ||
-        t === "/stop" ||
-        t === "/stop".toLowerCase() ||
-        t.includes("停下来") ||
-        t.includes("停一下") ||
-        t.includes("别说了") ||
-        t.includes("别写了") ||
-        t.includes("不要说了") ||
-        t === "算了";
-      if (isStop) {
-        agent.cancel({ kind: "user" });
-        diagLog(`[steer-diag] STOP 分支: text="${text.slice(0, 30)}" status=${agent.status}`);
-        return "stopped";
-      }
-      if (agent.status === "running") {
-        // ★ 温和打断
-        try {
-          agent.steer(message);
-          diagLog(`[steer-diag] STEER 分支: text="${text.slice(0, 30)}" status=${agent.status} steer() 调用成功`);
-        } catch (err) {
-          diagLog(`[steer-diag] STEER 分支但 steer() 抛异常: ${err instanceof Error ? err.message : String(err)}`);
+
+      // ── V4 关：回退旧逻辑（interruptClassifierEnabled=false / DSH_WING_INTERRUPT_CLASSIFIER=0）──
+      if (!deps.cfg().interruptClassifierEnabled) {
+        const t = text.trim().toLowerCase();
+        const isStop =
+          t === "停" ||
+          t === "停止" ||
+          t === "stop" ||
+          t === "/stop" ||
+          t === "/stop".toLowerCase() ||
+          t.includes("停下来") ||
+          t.includes("停一下") ||
+          t.includes("别说了") ||
+          t.includes("别写了") ||
+          t.includes("不要说了") ||
+          t === "算了";
+        if (isStop) {
+          agent.cancel({ kind: "user" });
+          diagLog(`[steer-diag] STOP 分支: text="${text.slice(0, 30)}" status=${agent.status}`);
+          return "stopped";
         }
-        return "steered";
+        if (agent.status === "running") {
+          // ★ 温和打断
+          try {
+            agent.steer(message);
+            diagLog(`[steer-diag] STEER 分支: text="${text.slice(0, 30)}" status=${agent.status} steer() 调用成功`);
+          } catch (err) {
+            diagLog(`[steer-diag] STEER 分支但 steer() 抛异常: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return "steered";
+        }
+        diagLog(`[steer-diag] QUEUE 分支(followup): text="${text.slice(0, 30)}" status=${agent.status}`);
+        agent.followup(message);
+        return "queued";
       }
-      diagLog(`[steer-diag] QUEUE 分支(followup): text="${text.slice(0, 30)}" status=${agent.status}`);
-      agent.followup(message);
-      return "queued";
+
+      // ── V4 开：四类分类决策表（顺序 COMMAND → QUESTION → CONFIRM → ORDINARY → null）──
+      const type = classifyInterrupt(text);
+      switch (type) {
+        case InterruptType.COMMAND: {
+          // 立即中断
+          agent.cancel({ kind: "user" });
+          if (isRedirectWord(text)) {
+            // 改道（换个话题/重新来）：先停，新指令排队注入
+            agent.followup(message);
+            diagLog(`[steer-diag] V4 COMMAND(改道) 分支: text="${text.slice(0, 30)}" status=${agent.status}`);
+          } else {
+            diagLog(`[steer-diag] V4 COMMAND(停止) 分支: text="${text.slice(0, 30)}" status=${agent.status}`);
+          }
+          return "stopped";
+        }
+        case InterruptType.QUESTION:
+        case InterruptType.CONFIRM: {
+          // 疑问/确认 → 不打断主任务（followup 排队，turn 结束后处理）
+          agent.followup(message);
+          diagLog(`[steer-diag] V4 ${type} 分支(followup): text="${text.slice(0, 30)}" status=${agent.status}`);
+          return "queued";
+        }
+        case InterruptType.ORDINARY: {
+          if (isForwardWord(text)) {
+            // 推进词（继续/接着来/往下）→ followup 注入（豆包细分拍板：必须注入，否则任务卡死）
+            agent.followup(message);
+            diagLog(`[steer-diag] V4 ORDINARY(推进) 分支(followup): text="${text.slice(0, 30)}" status=${agent.status}`);
+            return "queued";
+          }
+          // 纯确认词（嗯/好的/收到/明白/知道了）→ 仅回执（onInbound reaction 已打），不注入不打断
+          diagLog(`[steer-diag] V4 ORDINARY(纯确认) 分支(仅回执): text="${text.slice(0, 30)}" status=${agent.status}`);
+          return "queued";
+        }
+        default: {
+          // null：普通对话 → 原插话逻辑（running steer / idle followup）
+          if (agent.status === "running") {
+            try {
+              agent.steer(message);
+              diagLog(`[steer-diag] V4 null STEER 分支: text="${text.slice(0, 30)}" status=${agent.status} steer() 调用成功`);
+            } catch (err) {
+              diagLog(`[steer-diag] V4 null STEER 分支但 steer() 抛异常: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            return "steered";
+          }
+          diagLog(`[steer-diag] V4 null QUEUE 分支(followup): text="${text.slice(0, 30)}" status=${agent.status}`);
+          agent.followup(message);
+          return "queued";
+        }
+      }
     },
   };
 }

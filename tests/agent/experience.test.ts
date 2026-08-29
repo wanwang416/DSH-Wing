@@ -24,6 +24,7 @@ function baseCfg(over: Partial<WingConfig> = {}): WingConfig {
     reactions: { enabled: true, pool: ["👍"], done: "✅", failed: "❌" },
     turnTimeoutMs: 600_000,
     agentPreset: "code",
+    interruptClassifierEnabled: true,
     ...over,
   } as WingConfig;
 }
@@ -237,5 +238,115 @@ describe("experience.handleUserMessage", () => {
     const msg = { type: "user" };
     expect(ex.handleUserMessage("oc_1", agent, "新的问题", msg)).toBe("queued");
     expect(agent.followup).toHaveBeenCalledWith(msg);
+  });
+});
+
+describe("experience.handleUserMessage · V4 四类分类（interruptClassifierEnabled=true）", () => {
+  const mkAgent = (status: string) => ({
+    status,
+    steer: vi.fn(),
+    followup: vi.fn(),
+    cancel: vi.fn(),
+  });
+
+  it("QUESTION running → followup + queued（不 steer 不 cancel）★唤醒验证点1：单测验证 followup 调用", () => {
+    const { ex } = setup();
+    const agent = mkAgent("running");
+    const msg = { type: "user" };
+    expect(ex.handleUserMessage("oc_1", agent, "为什么这样设计", msg)).toBe("queued");
+    expect(agent.followup).toHaveBeenCalledWith(msg);
+    expect(agent.steer).not.toHaveBeenCalled();
+    expect(agent.cancel).not.toHaveBeenCalled();
+  });
+
+  it("QUESTION idle → followup + queued", () => {
+    const { ex } = setup();
+    const agent = mkAgent("idle");
+    const msg = { type: "user" };
+    expect(ex.handleUserMessage("oc_1", agent, "怎么做这道题", msg)).toBe("queued");
+    expect(agent.followup).toHaveBeenCalledWith(msg);
+  });
+
+  it("CONFIRM running → followup + queued（不打断主任务）", () => {
+    const { ex } = setup();
+    const agent = mkAgent("running");
+    const msg = { type: "user" };
+    expect(ex.handleUserMessage("oc_1", agent, "你确定", msg)).toBe("queued");
+    expect(agent.followup).toHaveBeenCalledWith(msg);
+    expect(agent.steer).not.toHaveBeenCalled();
+  });
+
+  it("ORDINARY 纯确认词（好的）running → 仅回执：不 followup 不 steer + queued", () => {
+    const { ex } = setup();
+    const agent = mkAgent("running");
+    expect(ex.handleUserMessage("oc_1", agent, "好的", {})).toBe("queued");
+    expect(agent.followup).not.toHaveBeenCalled();
+    expect(agent.steer).not.toHaveBeenCalled();
+    expect(agent.cancel).not.toHaveBeenCalled();
+  });
+
+  it("ORDINARY 推进词（继续）running → followup + queued（豆包细分：必须注入）", () => {
+    const { ex } = setup();
+    const agent = mkAgent("running");
+    const msg = { type: "user" };
+    expect(ex.handleUserMessage("oc_1", agent, "继续", msg)).toBe("queued");
+    expect(agent.followup).toHaveBeenCalledWith(msg);
+    expect(agent.steer).not.toHaveBeenCalled();
+  });
+
+  it("COMMAND 停止词 running → cancel + stopped（不 followup）", () => {
+    const { ex } = setup();
+    const agent = mkAgent("running");
+    expect(ex.handleUserMessage("oc_1", agent, "停", {})).toBe("stopped");
+    expect(agent.cancel).toHaveBeenCalledWith({ kind: "user" });
+    expect(agent.followup).not.toHaveBeenCalled();
+  });
+
+  it("COMMAND 改道词（换个话题）running → cancel + followup + stopped", () => {
+    const { ex } = setup();
+    const agent = mkAgent("running");
+    const msg = { type: "user" };
+    expect(ex.handleUserMessage("oc_1", agent, "换个话题", msg)).toBe("stopped");
+    expect(agent.cancel).toHaveBeenCalledWith({ kind: "user" });
+    expect(agent.followup).toHaveBeenCalledWith(msg);
+  });
+
+  it("null（普通对话）idle → followup + queued", () => {
+    const { ex } = setup();
+    const agent = mkAgent("idle");
+    const msg = { type: "user" };
+    expect(ex.handleUserMessage("oc_1", agent, "给我讲个笑话", msg)).toBe("queued");
+    expect(agent.followup).toHaveBeenCalledWith(msg);
+  });
+});
+
+describe("experience.handleUserMessage · V4 关（interruptClassifierEnabled=false 回退旧逻辑）", () => {
+  const mkAgent = (status: string) => ({
+    status,
+    steer: vi.fn(),
+    followup: vi.fn(),
+    cancel: vi.fn(),
+  });
+
+  it("推进词「继续」running → steer（回退旧逻辑，不再走分类）", () => {
+    const { ex } = setup({ interruptClassifierEnabled: false });
+    const agent = mkAgent("running");
+    const msg = { type: "user" };
+    expect(ex.handleUserMessage("oc_1", agent, "继续", msg)).toBe("steered");
+    expect(agent.steer).toHaveBeenCalledWith(msg);
+  });
+
+  it("纯确认词「好的」running → steer（旧逻辑把一切非停止词当插话）", () => {
+    const { ex } = setup({ interruptClassifierEnabled: false });
+    const agent = mkAgent("running");
+    expect(ex.handleUserMessage("oc_1", agent, "好的", {})).toBe("steered");
+    expect(agent.steer).toHaveBeenCalled();
+  });
+
+  it("停止词「停」running → cancel + stopped", () => {
+    const { ex } = setup({ interruptClassifierEnabled: false });
+    const agent = mkAgent("running");
+    expect(ex.handleUserMessage("oc_1", agent, "停", {})).toBe("stopped");
+    expect(agent.cancel).toHaveBeenCalledWith({ kind: "user" });
   });
 });
