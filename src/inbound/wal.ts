@@ -120,7 +120,14 @@ export function createInboundWal(deps: InboundWalDeps) {
     remove(messageId: string): void {
       if (records.delete(messageId)) persistAll();
     },
-    pendingCount: () => records.size,
+    // 待消化计数：只计未 delivered 的记录（哈马 2026-08-29 收尾项——原 records.size 把已处理完的也算进去，/status 虚高）
+    pendingCount: () => {
+      let n = 0;
+      for (const r of records.values()) {
+        if (r.state !== "delivered") n++;
+      }
+      return n;
+    },
   };
 }
 
