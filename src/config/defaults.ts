@@ -40,6 +40,12 @@ export interface WingConfig {
   workspaceRoot?: string;
   /** agent preset */
   agentPreset: string;
+  /**
+   * 任务中断四类分类开关（P0-1 ★ ALAN 灵魂设计）。
+   * 默认开启，可用环境变量 `DSH_WING_INTERRUPT_CLASSIFIER=0` 关闭（回退旧 steer/停止词逻辑）。
+   * 命名走行为描述（interruptClassifierEnabled），不用版本号（interruptV4）——豆包拍板。
+   */
+  interruptClassifierEnabled: boolean;
 }
 
 export const DEFAULT_CONFIG: WingConfig = {
@@ -58,6 +64,8 @@ export const DEFAULT_CONFIG: WingConfig = {
   },
   turnTimeoutMs: 600_000,
   agentPreset: "code",
+  // 环境变量显式置 "0" 才关闭；config.json 可覆盖（getConfig 的 ...raw 天然优先）
+  interruptClassifierEnabled: process.env.DSH_WING_INTERRUPT_CLASSIFIER !== "0",
 };
 
 /** 合并 rawConfig 与默认值（嵌套对象深合并） */
