@@ -11,6 +11,8 @@
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { WingAgentHandle } from "../agent/caller.js";
 import type { InteractiveRouter } from "../interactive/router.js";
+import type { ApprovalBridge } from "../interactive/approval.js";
+import { APPROVAL_OP_PREFIX } from "../interactive/approval.js";
 
 export interface EventHandlerDeps {
   outbox: {
@@ -25,10 +27,12 @@ export interface EventHandlerDeps {
   experience?: { handleUserMessage(chatId: string, agent: WingAgentHandle, text: string, message: unknown): string };
   /** P1-2 单选卡回调路由（mode/permission/model/preset 前缀；answer:/free_text: 提问卡仍走 userQuestionBridge） */
   interactiveRouter?: InteractiveRouter;
+  /** P1-1 审批卡回调（approval:<entryId>:<decision> 前缀；需带点击者 open_id 做老板限定） */
+  approvalBridge?: ApprovalBridge;
 }
 
 export function createEventHandler(deps: EventHandlerDeps) {
-  const { outbox, logger, mapper, userQuestionBridge, experience, interactiveRouter } = deps;
+  const { outbox, logger, mapper, userQuestionBridge, experience, interactiveRouter, approvalBridge } = deps;
 
   return function onEvent(event: string, data: unknown): void {
     // M2 订阅：表情/撤回/bot进退群/P2P/已读/card.action.trigger（ask-user-question 需要）
@@ -80,17 +84,28 @@ export function createEventHandler(deps: EventHandlerDeps) {
             logger?.warn?.(`card.action.trigger: 取不到 chatId，事件字段不匹配。可用键=${Object.keys(d).join(",")}`);
             break;
           }
-          // P1-2 单选卡回调：value.op（mode/permission/model/preset 前缀，schema 2.0 按钮 value）
-          //   提问卡 value.action（answer:/free_text:）不在此分支——保留原路径。
+          // 回调 op 分发（P1-2 单选卡 + P1-1 审批卡；提问卡 value.action answer:/free_text: 不在此分支）
           const rawValue = d.action?.value ?? (d as any).event?.action?.value ?? null;
           const op = typeof rawValue === "string" ? rawValue : rawValue?.op;
           if (op && !op.startsWith("answer:")) {
             (async () => {
               try {
-                const consumed = (await interactiveRouter?.onCardAction(chatId, op)) ?? false;
-                if (!consumed) logger?.warn?.(`card.action.trigger: 单选卡 op 未消费 op=${op} chatId=${chatId}`);
+                if (op.startsWith(APPROVAL_OP_PREFIX)) {
+                  // P1-1 审批卡回调：带点击者 open_id（老板限定校验，拍板④）
+                  const operatorOpenId =
+                    (d as any).operator?.operator_id?.open_id ??
+                    (d as any).operator?.open_id ??
+                    (d as any).operator?.operator_id;
+                  const consumed = approvalBridge?.onCardAction(chatId, op, operatorOpenId) ?? false;
+                  if (!consumed) logger?.warn?.(`card.action.trigger: 审批卡回调未消费 op=${op} chatId=${chatId}`);
+                } else {
+                  // P1-2 单选卡回调
+                  const consumed = (await interactiveRouter?.onCardAction(chatId, op)) ?? false;
+                  if (!consumed) logger?.warn?.(`card.action.trigger: 单选卡 op 未消费 op=${op} chatId=${chatId}`);
+                }
               } catch (err) {
-                logger?.warn?.(`card.action.trigger: 单选卡处理失败 op=${op}: ${err instanceof Error ? err.message : String(err)}`);
+                const label = op.startsWith(APPROVAL_OP_PREFIX) ? "审批卡处理失败" : "单选卡处理失败";
+                logger?.warn?.(`card.action.trigger: ${label} op=${op}: ${err instanceof Error ? err.message : String(err)}`);
               }
             })();
             break;

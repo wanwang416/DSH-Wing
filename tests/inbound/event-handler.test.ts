@@ -227,4 +227,54 @@ describe("createEventHandler（M4 提取重构）", () => {
       expect(onCardAction).not.toHaveBeenCalled();
     });
   });
+
+  describe("card.action 审批卡 op 路由（P1-1）", () => {
+    it("approval: 前缀 → 交 approvalBridge + 透传点击者 open_id（老板限定）", async () => {
+      const onApproval = vi.fn().mockReturnValue(true);
+      const { deps } = makeDeps({ approvalBridge: { onCardAction: onApproval } });
+      const onEvent = createEventHandler(deps as any);
+      onEvent("card.action.trigger", {
+        context: { open_chat_id: "oc_1" },
+        action: { value: { op: "approval:a1_1:allow-once" } },
+        operator: { operator_id: { open_id: "ou_boss" } },
+      });
+      expect(onApproval).toHaveBeenCalledWith("oc_1", "approval:a1_1:allow-once", "ou_boss");
+      // 不走去 answer 路径（steer 不触发）
+      expect(deps.mapper.getOrCreateAgent).not.toHaveBeenCalled();
+    });
+
+    it("operator.open_id 兜底路径（operator_id 无 open_id 字段）", async () => {
+      const onApproval = vi.fn().mockReturnValue(true);
+      const { deps } = makeDeps({ approvalBridge: { onCardAction: onApproval } });
+      const onEvent = createEventHandler(deps as any);
+      onEvent("card.action.trigger", {
+        context: { open_chat_id: "oc_1" },
+        action: { value: { op: "approval:a1_2:deny" } },
+        operator: { open_id: "ou_fallback" },
+      });
+      expect(onApproval).toHaveBeenCalledWith("oc_1", "approval:a1_2:deny", "ou_fallback");
+    });
+
+    it("审批卡未消费（返回 false）→ warn「审批卡回调未消费」", async () => {
+      const onApproval = vi.fn().mockReturnValue(false);
+      const { deps } = makeDeps({ approvalBridge: { onCardAction: onApproval } });
+      const onEvent = createEventHandler(deps as any);
+      onEvent("card.action.trigger", {
+        context: { open_chat_id: "oc_1" },
+        action: { value: { op: "approval:nope:allow-once" } },
+      });
+      expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("审批卡回调未消费"));
+    });
+
+    it("approvalBridge 抛错 → warn 回调处理失败", async () => {
+      const onApproval = vi.fn(() => { throw new Error("approval boom"); });
+      const { deps } = makeDeps({ approvalBridge: { onCardAction: onApproval } });
+      const onEvent = createEventHandler(deps as any);
+      onEvent("card.action.trigger", {
+        context: { open_chat_id: "oc_1" },
+        action: { value: { op: "approval:a1_3:allow-once" } },
+      });
+      expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("审批卡"));
+    });
+  });
 });
