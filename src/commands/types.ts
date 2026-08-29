@@ -31,8 +31,11 @@ export interface BridgeCommandServices {
     get(chatId: string): { status: string; cancel(cause: { kind: string }): void } | undefined;
     disposeAgentFor(chatId: string): Promise<void>;
   };
-  /** 路由持久化（/new 用：移除旧路由账目 → 下次全新创建） */
-  routeStore?: { remove(sessionKey: string): void };
+  /** 路由持久化（/new 用：移除旧路由账目 → 下次全新创建；/resume 用：查历史 sessionId） */
+  routeStore?: {
+    remove(sessionKey: string): void;
+    get(key: string): { sessionId?: string; updatedAt?: number } | undefined;
+  };
   /** 出站待发计数（/status 用） */
   outbox?: { pendingCount(): number };
   /** 入站 WAL 待消化计数（/status 用） */
@@ -67,6 +70,16 @@ export interface BridgeCommandServices {
     set(chatId: string, sel: { provider: string; model: string }): void;
     clear(chatId: string): void;
   };
+  /** P1-3：显式恢复上次会话（/resume；有 route → 触发 resumeAgent，无 → 提示） */
+  resumeSession?(chatId: string): Promise<{ resumed: boolean; sessionId?: string }>;
+  /** P1-3：工作区显示/切换（/workspace） */
+  workspace?: {
+    get(): string;
+    /** 校验路径存在 + 设置为新工作区；成功返回 true */
+    set(path: string): boolean;
+  };
+  /** P1-3：手动注入消息（/steer；running→steer，idle→followup；无 agent → no-agent） */
+  steer?(chatId: string, text: string): Promise<"steered" | "queued" | "no-agent">;
 }
 
 /** 桥命令定义（注册制：新命令 = 定义此对象 + 注册进 bridgeCommands Map） */
