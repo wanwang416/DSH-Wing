@@ -52,6 +52,8 @@ import { createModelOverrideStore } from "./session/model-overrides.js";
 import { createModelRegistry, createModelSync } from "./agent/model.js";
 import { listPresets, SHIPPED_PRESETS, type PresetOption } from "./agent/preset.js";
 import { createInteractiveRouter } from "./interactive/router.js";
+import { createApprovalBridge } from "./interactive/approval.js";
+import type { ApprovalOutcome, ApprovalRequest } from "@deepseek-ai/dsh-user-approval";
 import type { SelectorItem } from "./interactive/selector.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
 import { createSender } from "./outbound/sender.js";
@@ -284,6 +286,33 @@ export function apply(ctx: any, rawConfig: unknown): void {
     presets: () => presetsCache,
     logger,
   });
+
+  // ---------- P1-1 审批卡（danger-full-access 危险操作审批；ALAN 拍板④：仅老板本人可点） ----------
+  // approval/request waterfall：记忆命中 → 直接 allowed-once；否则弹四按钮审批卡
+  const approvalBridge = createApprovalBridge({
+    sendCard: (chatId, card) =>
+      outbox.enqueue({
+        dedupeKey: `${sessionKey(chatId)}:approval:${Date.now()}`,
+        chatId,
+        kind: "card",
+        payload: { kind: "card", card },
+      }),
+    sendText: (chatId, text) =>
+      outbox.enqueue({
+        dedupeKey: `${sessionKey(chatId)}:approval:text:${Date.now()}`,
+        chatId,
+        kind: "text",
+        payload: { kind: "text", text },
+      }),
+    bossOpenId: cfg.bossOpenId,
+    timeoutMs: cfg.turnTimeoutMs,
+    memoryFile: join(dir, "approval-memory.json"),
+    logger,
+  });
+  // 注册 answerer（cordis waterfall：返回 outcome 认领；非 feishu agent → next() 让后续）
+  const disposeApproval = ctx.on("approval/request", (req: ApprovalRequest, next: () => Promise<ApprovalOutcome>) =>
+    approvalBridge.answer(req, next),
+  );
 
   // ---------- P0-2 命令系统（注册制三级分流，对齐基底  成熟桥接命令路由） ----------
   // 注册制：新增桥命令 = 定义 BridgeCommandDef + 注册进 bridgeCommands（P0-3 填 /stop /new 等）
@@ -606,7 +635,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
       await dispatcher.handleEvent("im.message.receive_v1", data);
     },
     // M4 任务 6 提取重构：5 类事件处理独立模块（bot_added/p2p_entered/card.action/recalled/default）
-    onEvent: createEventHandler({ outbox, logger, mapper, userQuestionBridge, experience, interactiveRouter }),
+    onEvent: createEventHandler({ outbox, logger, mapper, userQuestionBridge, experience, interactiveRouter, approvalBridge }),
     lockDir: join(dir, "locks"),
     logger,
   });
@@ -836,6 +865,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     sweep.unref?.();
     return async () => {
       disposeAskPatch();
+      disposeApproval();
       clearInterval(sweep);
       await stopBridge();
     };

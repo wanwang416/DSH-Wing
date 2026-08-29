@@ -241,6 +241,8 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
     effect: vi.fn((fn: () => unknown) => { h.effectFn = fn; return vi.fn(); }),
     credentials: { resolve: vi.fn().mockResolvedValue(undefined) },
     userQuestions: { ask: vi.fn() },
+    // P1-1：approval/request waterfall 注册（返回 dispose 供 cleanup）
+    on: vi.fn(() => vi.fn()),
     ...overrides,
   };
 }

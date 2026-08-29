@@ -51,6 +51,11 @@ export interface WingConfig {
    * 默认 undefined = 关闭（零开销）；排障时在 config.json 配路径临时开启。
    */
   steerDiagLogPath?: string;
+  /**
+   * 老板 open_id（P1-1 审批卡限定：ALAN 拍板④，防群聊他人代替老板批准危险操作）。
+   * 未配置 → 审批卡不拦截任何人（单用户宽松 + 日志 warn 提示风险）。
+   */
+  bossOpenId?: string;
 }
 
 export const DEFAULT_CONFIG: WingConfig = {
