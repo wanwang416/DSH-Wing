@@ -45,7 +45,14 @@ import { newCommand } from "./commands/new.js";
 import { statusCommand } from "./commands/status.js";
 import { modeCommand } from "./commands/mode.js";
 import { permissionCommand } from "./commands/permission.js";
+import { modelCommand } from "./commands/model.js";
+import { presetCommand } from "./commands/preset.js";
 import { helpCommand } from "./commands/help.js";
+import { createModelOverrideStore } from "./session/model-overrides.js";
+import { createModelRegistry, createModelSync } from "./agent/model.js";
+import { listPresets, SHIPPED_PRESETS, type PresetOption } from "./agent/preset.js";
+import { createInteractiveRouter } from "./interactive/router.js";
+import type { SelectorItem } from "./interactive/selector.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
 import { createSender } from "./outbound/sender.js";
 import { createOutbox } from "./outbound/outbox.js";
@@ -95,6 +102,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const routeStore = createRouteStore(join(dir, "routes.json"));
   const dedupe = createDedupeStore(join(dir, "dedupe.jsonl"));
   const status = createStatusStore(join(dir, "status.json"));
+  // P1-2 per-chat 模型 override（/model 手动切换，重启恢复；与 routes.json 独立）
+  const modelOverrides = createModelOverrideStore(join(dir, "model-overrides.json"));
 
   // ---------- 凭据 + 客户端 ----------
   const credStore = createCredentialStore(ctx);
@@ -222,6 +231,59 @@ export function apply(ctx: any, rawConfig: unknown): void {
     permissionMode: cfg.permissionMode,
     agentPreset: cfg.agentPreset,
   };
+  /** 校验 + 设置权限模式（非法返回 false）；runtime/commandServices/interactiveRouter 共用 */
+  const setPermissionMode = (mode: string): boolean => {
+    if (mode !== "read-only" && mode !== "workspace-write" && mode !== "danger-full-access") return false;
+    runtime.permissionMode = mode;
+    return true;
+  };
+
+  // ---------- P1-2 模型 registry + preset 缓存 + 单选卡回调路由 ----------
+  // 模型：per-chat live 对象（override 优先）；GUI 默认经 10s 轮询刷新
+  const modelRegistry = createModelRegistry({ overrides: modelOverrides });
+  const modelSync = createModelSync({
+    getGuiModel: () => {
+      const cur = ctx.get?.("agentDefaultModel")?.currentSelection?.();
+      return cur?.provider && cur.model ? { provider: cur.provider, model: cur.model } : undefined;
+    },
+    onChange: (sel) => modelRegistry.setModelDefault(sel),
+    logger,
+  });
+  // preset 候选（启动加载真实 roster，失败兜底 4 档；命令层/路由读缓存）
+  let presetsCache: PresetOption[] = [...SHIPPED_PRESETS];
+  void listPresets(ctx, logger)
+    .then((ps) => { if (ps.length > 0) presetsCache = ps; })
+    .catch(() => void 0);
+
+  /** /preset 换预设完整 rotate（提取独立：interactiveRouter + 命令层复用，对齐 /new rotate 语义） */
+  const rotateSession = async (chatId: string): Promise<void> => {
+    await mapper?.disposeAgentFor(chatId); // dispose 旧 agent（内部 gen+1，随即归零）
+    resetRunNonce(); // mint fresh runNonce（换新家族，不撞旧日志）
+    resetGeneration(chatId); // gen 归零（对齐 rotate 语义）
+    routeStore.remove(sessionKey(chatId)); // 移除旧路由账目 → 下次 createAgent 全新创建
+  };
+
+  // 单选卡回调路由（依赖 runtime/modelRegistry/rotateSession/reply，须在 event-handler 之前创建）
+  // ★ 回执 dedupeKey 带 Date.now() 唯一 token——同一张卡点两次不被 durableReply 去重吞（ 成熟桥接踩坑）
+  const interactiveRouter = createInteractiveRouter({
+    runtime: {
+      getPermissionMode: () => runtime.permissionMode,
+      setPermissionMode,
+      getAgentPreset: () => runtime.agentPreset,
+      setAgentPreset: (id: string) => { runtime.agentPreset = id; },
+    },
+    modelRegistry,
+    rotateSession,
+    reply: (chatId, text) =>
+      outbox.enqueue({
+        dedupeKey: `${sessionKey(chatId)}:sel:${Date.now()}`,
+        chatId,
+        kind: "text",
+        payload: { kind: "text", text },
+      }),
+    presets: () => presetsCache,
+    logger,
+  });
 
   // ---------- P0-2 命令系统（注册制三级分流，对齐基底  成熟桥接命令路由） ----------
   // 注册制：新增桥命令 = 定义 BridgeCommandDef + 注册进 bridgeCommands（P0-3 填 /stop /new 等）
@@ -265,14 +327,16 @@ export function apply(ctx: any, rawConfig: unknown): void {
   ): Promise<void> {
     const cmdName = routed.kind === "bridge" ? routed.command.name : routed.name;
     let reply: string | undefined;
+    let replyCard: Record<string, unknown> | undefined;
     let doneReaction = routed.kind === "bridge"; // 桥命令执行成功打 DONE（对齐基底 命令路由.ts:90-100）
     if (routed.kind === "bridge") {
       const res = await routed.command
         .run({ logger, services: commandServices }, routed.rawInput, msg)
-        .catch((err: unknown) => ({
+        .catch((err: unknown): { text?: string; card?: Record<string, unknown> } => ({
           text: `⚠️ 命令执行失败: ${err instanceof Error ? err.message : String(err)}`,
         }));
       reply = res?.text;
+      replyCard = res?.card;
     } else {
       // DSH 命令格式适配（哈马注意事项 3）：success→原文；error→⚠️ 前缀；无文本→提示已执行
       const res = await dshCommandService.execute(routed.agent, routed.line);
@@ -307,13 +371,20 @@ export function apply(ctx: any, rawConfig: unknown): void {
     compensation.noteDelivered(msg.messageId);
     status.refreshCounters({ inboundPending: inboundWal.pendingCount(), sessions: mapper?.size() ?? 0 });
 
-    // 命令回复（持久化 outbox，幂等 per 触发消息）
+    // 命令回复（持久化 outbox，幂等 per 触发消息；单选卡命令发 card，其余发 text）
     if (reply) {
       outbox.enqueue({
         dedupeKey: `${key}:cmd:${cmdName}:${msg.messageId}`,
         chatId: msg.chatId,
         kind: "text",
         payload: { kind: "text", text: reply },
+      });
+    } else if (replyCard) {
+      outbox.enqueue({
+        dedupeKey: `${key}:cmd:${cmdName}:${msg.messageId}`,
+        chatId: msg.chatId,
+        kind: "card",
+        payload: { kind: "card", card: replyCard },
       });
     }
     // DONE 表情
@@ -342,6 +413,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
     permissionMode: runtime.permissionMode,
     onSessionEvent: (chatId: string, event: Parameters<typeof forwarder.onSessionEvent>[1]) =>
       forwarder.onSessionEvent(chatId, event),
+    // P1-2 live 模型对象（/model 手动 override 优先；mutate 即对已存在 agent 生效）
+    getModelLive: (chatId: string) => modelRegistry.liveFor(chatId),
     logger,
   });
 
@@ -533,7 +606,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
       await dispatcher.handleEvent("im.message.receive_v1", data);
     },
     // M4 任务 6 提取重构：5 类事件处理独立模块（bot_added/p2p_entered/card.action/recalled/default）
-    onEvent: createEventHandler({ outbox, logger, mapper, userQuestionBridge, experience }),
+    onEvent: createEventHandler({ outbox, logger, mapper, userQuestionBridge, experience, interactiveRouter }),
     lockDir: join(dir, "locks"),
     logger,
   });
@@ -614,12 +687,9 @@ export function apply(ctx: any, rawConfig: unknown): void {
     connection: { state: () => supervisor.state() },
     runtime: {
       getPermissionMode: () => runtime.permissionMode,
-      setPermissionMode: (mode) => {
-        if (mode !== "read-only" && mode !== "workspace-write" && mode !== "danger-full-access") return false;
-        runtime.permissionMode = mode;
-        return true;
-      },
+      setPermissionMode, // 提取共用：runtime/interactiveRouter/命令层同一校验
       getAgentPreset: () => runtime.agentPreset,
+      setAgentPreset: (id: string) => { runtime.agentPreset = id; },
     },
     getModel: async () => {
       try {
@@ -630,19 +700,55 @@ export function apply(ctx: any, rawConfig: unknown): void {
       }
     },
     // /new 完整 rotate：对齐基底 成熟桥接.ts:941 注释（fresh runNonce + generation 0 → 无碰撞新 id）
-    rotateSession: async (chatId) => {
-      await mapper?.disposeAgentFor(chatId); // dispose 旧 agent（内部 gen+1，随即归零）
-      resetRunNonce(); // mint fresh runNonce（换新家族，不撞旧日志）
-      resetGeneration(chatId); // gen 归零（对齐 rotate 语义）
-      routeStore.remove(sessionKey(chatId)); // 移除旧路由账目 → 下次 createAgent 全新创建
-    },
+    rotateSession,
     listCommands: () => [...bridgeCommands.values()].map(({ name, description }) => ({ name, description })),
+    // P1-2 单选卡命令服务
+    sendCard: (chatId, card) =>
+      outbox.enqueue({
+        dedupeKey: `${sessionKey(chatId)}:card:${Date.now()}`,
+        chatId,
+        kind: "card",
+        payload: { kind: "card", card },
+      }),
+    listPresets: async () => presetsCache,
+    getModelOptions: async () => {
+      try {
+        const llm = ctx.get?.("llm") as
+          | { listProviders?(): Array<{ id?: string; name?: string }>; listModels?(p: string): Promise<Array<{ id: string; name?: string }>> }
+          | undefined;
+        const providers = llm?.listProviders?.() ?? [];
+        const out: SelectorItem[] = [];
+        for (const p of providers) {
+          const pid = p.id ?? "";
+          let models: Array<{ id: string; name?: string }> = [];
+          try {
+            models = (await llm?.listModels?.(pid)) ?? [];
+          } catch {
+            // adapter 无模型目录 → 跳过该 provider
+          }
+          const pLabel = p.name ?? pid;
+          for (const m of models) {
+            out.push({ id: `${pid}/${m.id}`, label: `${pLabel} · ${m.name ?? m.id}` });
+          }
+        }
+        return out;
+      } catch {
+        return [];
+      }
+    },
+    modelOverride: {
+      has: (chatId) => modelRegistry.hasOverride(chatId),
+      set: (chatId, sel) => modelRegistry.setOverride(chatId, sel),
+      clear: (chatId) => modelRegistry.clearOverride(chatId),
+    },
   };
   bridgeCommands.set("stop", stopCommand);
   bridgeCommands.set("new", newCommand);
   bridgeCommands.set("status", statusCommand);
   bridgeCommands.set("mode", modeCommand);
   bridgeCommands.set("permission", permissionCommand);
+  bridgeCommands.set("model", modelCommand);
+  bridgeCommands.set("preset", presetCommand);
   bridgeCommands.set("help", helpCommand);
 
   const startBridge = async (): Promise<void> => {
@@ -691,9 +797,11 @@ export function apply(ctx: any, rawConfig: unknown): void {
       status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
       // 6) 连接监督启动（含 WS 连接 + 探活 + 自动重连）
       await supervisor.start();
+      // P1-2 模型 GUI 同步（10s 轮询 currentSelection，GUI 切模型 → 桥跟随无 override 会话）
+      modelSync.start();
       lifecycleStarted = true;
       startBlocker = undefined;
-      logger.info?.("bridge started (M2)");
+      logger.info?.("bridge started (M2 + P1-2 model sync)");
     } catch (err) {
       startBlocker = err instanceof Error ? err.message : String(err);
       logger.error?.(`bridge 启动失败: ${startBlocker}`);
@@ -702,6 +810,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
   const stopBridge = async (): Promise<void> => {
     if (!lifecycleStarted) return;
+    modelSync.stop();
     turnSupervisor.stop();
     await supervisor.stop(); // 内部先 transport.stop（CLOSE frame）
     await outbox.stop();

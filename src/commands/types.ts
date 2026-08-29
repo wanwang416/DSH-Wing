@@ -5,6 +5,8 @@
  * 改进：桥命令用注册制 Map（新增命令 = 加文件 + 注册，不改路由核心）。
  */
 import type { ParsedMessage } from "../inbound/parser.js";
+import type { SelectorItem } from "../interactive/selector.js";
+import type { PresetOption } from "../agent/preset.js";
 
 /** DSH 命令执行结果（对齐 @deepseek-ai/dsh-commands CommandResult） */
 export type DshCommandResult =
@@ -37,12 +39,14 @@ export interface BridgeCommandServices {
   inboundWal?: { pendingCount(): number };
   /** 连接状态（/status 用，supervisor.state()） */
   connection?: { state(): string };
-  /** 可变 runtime（/mode /permission /status 用） */
+  /** 可变 runtime（/mode /permission /status /preset 用） */
   runtime?: {
     getPermissionMode(): string;
     /** 校验 + 设置；非法模式返回 false */
     setPermissionMode(mode: string): boolean;
     getAgentPreset(): string;
+    /** 设置 agent 预设（P1-2 /preset 单选卡；切换后由命令层触发 rotateSession） */
+    setAgentPreset(id: string): void;
   };
   /** 当前模型（/status 用，动态读 agentDefaultModel.currentSelection） */
   getModel?(): Promise<{ provider?: string; model?: string } | undefined>;
@@ -50,6 +54,19 @@ export interface BridgeCommandServices {
   rotateSession?(chatId: string): Promise<void>;
   /** 已注册桥命令清单（/help 用） */
   listCommands?(): Array<{ name: string; description: string }>;
+  /** P1-2：发交互卡（单选卡回复；outbox card enqueue，runCommand 收尾统一走） */
+  sendCard?(chatId: string, card: Record<string, unknown>): unknown;
+  /** P1-2：preset 候选列表（真实 roster 或兜底 4 档，index.ts 启动时加载） */
+  listPresets?(): Promise<PresetOption[]>;
+  /** P1-2：模型候选（llm.listProviders + listModels，构建 /model 单选卡） */
+  getModelOptions?(): Promise<SelectorItem[]>;
+  /** P1-2：per-chat 模型 override（/model 命令 + 单选卡回调共用同一 registry） */
+  modelOverride?: {
+    has(chatId: string): boolean;
+    /** 设 override（persist + mutate live 对象，下条回复生效——拍板③） */
+    set(chatId: string, sel: { provider: string; model: string }): void;
+    clear(chatId: string): void;
+  };
 }
 
 /** 桥命令定义（注册制：新命令 = 定义此对象 + 注册进 bridgeCommands Map） */
@@ -58,12 +75,12 @@ export interface BridgeCommandDef {
   name: string;
   /** 人类可读摘要（/help 发现用，全中文） */
   description: string;
-  /** 执行体；返回 undefined 表示无回复文本 */
+  /** 执行体；返回 undefined 表示无回复 */
   run(
     deps: BridgeCommandContext,
     rawInput: string,
     msg: ParsedMessage,
-  ): Promise<{ text?: string } | undefined>;
+  ): Promise<{ text?: string; card?: Record<string, unknown> } | undefined>;
 }
 
 /** DSH 命令服务薄封装（真实 API：@deepseek-ai/dsh-commands CommandRuntime） */

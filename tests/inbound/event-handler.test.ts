@@ -163,4 +163,68 @@ describe("createEventHandler（M4 提取重构）", () => {
     onEvent("im.message.reaction.created_v1", { a: 1 });
     expect(deps.logger.info).toHaveBeenCalledWith(expect.stringContaining("事件 im.message.reaction.created_v1 收到"));
   });
+
+  describe("card.action 单选卡 op 路由（P1-2）", () => {
+    it("value.op 单选卡前缀 → 交 interactiveRouter，不走去 answer 路径", async () => {
+      const onCardAction = vi.fn().mockResolvedValue(true);
+      const { deps } = makeDeps({ interactiveRouter: { onCardAction } });
+      const onEvent = createEventHandler(deps as any);
+      onEvent("card.action.trigger", {
+        context: { open_chat_id: "oc_1" },
+        action: { value: { op: "mode:read-only" } },
+      });
+      await vi.waitFor(() => expect(onCardAction).toHaveBeenCalledWith("oc_1", "mode:read-only"));
+      expect(deps.mapper.getOrCreateAgent).not.toHaveBeenCalled();
+      expect(deps.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("不匹配 answer: 前缀"));
+    });
+
+    it("value 为字符串 → 直接作为 op 传参", async () => {
+      const onCardAction = vi.fn().mockResolvedValue(true);
+      const { deps } = makeDeps({ interactiveRouter: { onCardAction } });
+      const onEvent = createEventHandler(deps as any);
+      onEvent("card.action.trigger", {
+        context: { open_chat_id: "oc_1" },
+        action: { value: "model:deepseek/deepseek-chat" },
+      });
+      await vi.waitFor(() => expect(onCardAction).toHaveBeenCalledWith("oc_1", "model:deepseek/deepseek-chat"));
+    });
+
+    it("op 未被消费（返回 false）→ warn「op 未消费」", async () => {
+      const onCardAction = vi.fn().mockResolvedValue(false);
+      const { deps } = makeDeps({ interactiveRouter: { onCardAction } });
+      const onEvent = createEventHandler(deps as any);
+      onEvent("card.action.trigger", {
+        context: { open_chat_id: "oc_1" },
+        action: { value: { op: "unknown:foo" } },
+      });
+      await vi.waitFor(() => expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("op 未消费")));
+    });
+
+    it("interactiveRouter 处理抛错 → warn 处理失败", async () => {
+      const onCardAction = vi.fn().mockRejectedValue(new Error("route boom"));
+      const { deps } = makeDeps({ interactiveRouter: { onCardAction } });
+      const onEvent = createEventHandler(deps as any);
+      onEvent("card.action.trigger", {
+        context: { open_chat_id: "oc_1" },
+        action: { value: { op: "preset:code" } },
+      });
+      await vi.waitFor(() => expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("单选卡处理失败")));
+    });
+
+    it("answer: 前缀仍走提问桥（op 不拦截 answer:）", async () => {
+      const onCardAction = vi.fn().mockResolvedValue(true);
+      const onAnswerAction = vi.fn().mockReturnValue(true);
+      const { deps } = makeDeps({
+        interactiveRouter: { onCardAction },
+        userQuestionBridge: { onCardAction: onAnswerAction },
+      });
+      const onEvent = createEventHandler(deps as any);
+      onEvent("card.action.trigger", {
+        context: { open_chat_id: "oc_1" },
+        action: { value: { action: "answer:q1", questionId: "q1", optionId: "o1", label: "选A" } },
+      });
+      await vi.waitFor(() => expect(onAnswerAction).toHaveBeenCalledWith("oc_1", "answer:q1"));
+      expect(onCardAction).not.toHaveBeenCalled();
+    });
+  });
 });

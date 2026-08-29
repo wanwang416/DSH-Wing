@@ -10,6 +10,7 @@
  */
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { WingAgentHandle } from "../agent/caller.js";
+import type { InteractiveRouter } from "../interactive/router.js";
 
 export interface EventHandlerDeps {
   outbox: {
@@ -22,10 +23,12 @@ export interface EventHandlerDeps {
   };
   userQuestionBridge?: { onCardAction(chatId: string, actionName: string): boolean };
   experience?: { handleUserMessage(chatId: string, agent: WingAgentHandle, text: string, message: unknown): string };
+  /** P1-2 单选卡回调路由（mode/permission/model/preset 前缀；answer:/free_text: 提问卡仍走 userQuestionBridge） */
+  interactiveRouter?: InteractiveRouter;
 }
 
 export function createEventHandler(deps: EventHandlerDeps) {
-  const { outbox, logger, mapper, userQuestionBridge, experience } = deps;
+  const { outbox, logger, mapper, userQuestionBridge, experience, interactiveRouter } = deps;
 
   return function onEvent(event: string, data: unknown): void {
     // M2 订阅：表情/撤回/bot进退群/P2P/已读/card.action.trigger（ask-user-question 需要）
@@ -75,6 +78,21 @@ export function createEventHandler(deps: EventHandlerDeps) {
             (d as any).event?.chat_id;
           if (!chatId) {
             logger?.warn?.(`card.action.trigger: 取不到 chatId，事件字段不匹配。可用键=${Object.keys(d).join(",")}`);
+            break;
+          }
+          // P1-2 单选卡回调：value.op（mode/permission/model/preset 前缀，schema 2.0 按钮 value）
+          //   提问卡 value.action（answer:/free_text:）不在此分支——保留原路径。
+          const rawValue = d.action?.value ?? (d as any).event?.action?.value ?? null;
+          const op = typeof rawValue === "string" ? rawValue : rawValue?.op;
+          if (op && !op.startsWith("answer:")) {
+            (async () => {
+              try {
+                const consumed = (await interactiveRouter?.onCardAction(chatId, op)) ?? false;
+                if (!consumed) logger?.warn?.(`card.action.trigger: 单选卡 op 未消费 op=${op} chatId=${chatId}`);
+              } catch (err) {
+                logger?.warn?.(`card.action.trigger: 单选卡处理失败 op=${op}: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            })();
             break;
           }
           // action 名：schema 2.0 从 action.value.action 取，兼容旧版 action.name
