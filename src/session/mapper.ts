@@ -47,6 +47,8 @@ export function resetRunNonce(): void {
 export interface AgentHandleLike {
   agentId: string;
   sessionId: string;
+  /** DSH 原生 agent 对象（P0-2 命令路由 Tier2 需要；WingAgentHandle 必填，此处宽松可选） */
+  rawAgent?: unknown;
   followup(message: unknown): void;
   steer(message: unknown): void;
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void;
@@ -58,19 +60,20 @@ export interface AgentHandleLike {
 /**
  * chatId → agent handle 映射。
  * getOrCreateAgent：有则取，无则调用 createAgent 创建（惰性）。
+ * 泛型 THandle：调用方可收敛到具体 handle 类型（如 WingAgentHandle，P0-2 需要 rawAgent）。
  */
-export function createSessionMapper(opts: {
-  createAgent(chatId: string): Promise<AgentHandleLike>;
-  disposeAgent?(handle: AgentHandleLike): Promise<void>;
+export function createSessionMapper<THandle extends AgentHandleLike>(opts: {
+  createAgent(chatId: string): Promise<THandle>;
+  disposeAgent?(handle: THandle): Promise<void>;
 }) {
-  const agents = new Map<string, AgentHandleLike>();
+  const agents = new Map<string, THandle>();
   const idleAt = new Map<string, number>();
 
   return {
-    get(chatId: string): AgentHandleLike | undefined {
+    get(chatId: string): THandle | undefined {
       return agents.get(chatId);
     },
-    async getOrCreateAgent(chatId: string): Promise<AgentHandleLike> {
+    async getOrCreateAgent(chatId: string): Promise<THandle> {
       const existing = agents.get(chatId);
       if (existing) {
         idleAt.set(chatId, Date.now());
@@ -84,7 +87,7 @@ export function createSessionMapper(opts: {
     /** 空闲超过 ttlMs 的 agent 逐个 dispose（sweep 用） */
     async 空闲清理(ttlMs: number): Promise<number> {
       const cutoff = Date.now() - ttlMs;
-      const victims: Array<{ chatId: string; handle: AgentHandleLike }> = [];
+      const victims: Array<{ chatId: string; handle: THandle }> = [];
       for (const [chatId, handle] of agents) {
         if (handle.status === "idle" && (idleAt.get(chatId) ?? 0) < cutoff) {
           victims.push({ chatId, handle });

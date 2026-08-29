@@ -30,6 +30,34 @@ export interface TurnSupervisorLike {
   disarm(key: string): void;
 }
 
+/**
+ * 安全 followup（★ C2 · 对齐基底  成熟桥接成熟桥接.ts:804-817 铁证）：
+ * agent running 时 DSH 原生 followup 的 wakeup 请求不被 latch（会永久卡在 inbox），
+ * 正确姿势是先 `await agent.whenIdle()` 等 driver 收敛到 idle 再 followup。
+ * - running 且可 whenIdle → 异步补发（fire-and-forget，不阻塞调用方）；whenIdle 失败/agent 销毁 → 丢弃不重投
+ * - 其余 → 直接 followup
+ */
+function followupDeferred(
+  agent: { status: string; followup(message: unknown): void; whenIdle?(): Promise<void> },
+  message: unknown,
+  label: string,
+): void {
+  if (agent.status === "running" && typeof agent.whenIdle === "function") {
+    void agent
+      .whenIdle()
+      .then(() => {
+        diagLog(`[steer-diag] ${label} 补发(followup after idle)`);
+        agent.followup(message);
+      })
+      .catch(() => {
+        diagLog(`[steer-diag] ${label} 补发丢弃(whenIdle 失败/agent 已销毁)`);
+      });
+    return;
+  }
+  diagLog(`[steer-diag] ${label} 直接(followup)`);
+  agent.followup(message);
+}
+
 export interface ExperienceDeps {
   /** 普通消息发送（卡片降级用） */
   sendText(chatId: string, text: string): Promise<void>;
@@ -165,7 +193,7 @@ export function createExperience(deps: ExperienceDeps) {
      */
     handleUserMessage(
       chatId: string,
-      agent: { status: string; steer(message: unknown): void; followup(message: unknown): void; cancel(cause: { kind: string }): void },
+      agent: { status: string; steer(message: unknown): void; followup(message: unknown): void; cancel(cause: { kind: string }): void; whenIdle?(): Promise<void> },
       text: string,
       message: unknown,
     ): "stopped" | "steered" | "queued" {
@@ -223,16 +251,17 @@ export function createExperience(deps: ExperienceDeps) {
         }
         case InterruptType.QUESTION:
         case InterruptType.CONFIRM: {
-          // 疑问/确认 → 不打断主任务（followup 排队，turn 结束后处理）
-          agent.followup(message);
-          diagLog(`[steer-diag] V4 ${type} 分支(followup): text="${text.slice(0, 30)}" status=${agent.status}`);
+          // 疑问/确认 → 不打断主任务（★C2 安全 followup：running 时 whenIdle 后补发，
+          // 对齐基底 成熟桥接.ts:804-817——running 直接 followup 会卡 inbox）
+          followupDeferred(agent, message, `V4 ${type}`);
+          diagLog(`[steer-diag] V4 ${type} 分支(queued): text="${text.slice(0, 30)}" status=${agent.status}`);
           return "queued";
         }
         case InterruptType.ORDINARY: {
           if (isForwardWord(text)) {
-            // 推进词（继续/接着来/往下）→ followup 注入（豆包细分拍板：必须注入，否则任务卡死）
-            agent.followup(message);
-            diagLog(`[steer-diag] V4 ORDINARY(推进) 分支(followup): text="${text.slice(0, 30)}" status=${agent.status}`);
+            // 推进词（继续/接着来/往下）→ followup 注入（豆包细分拍板：必须注入，否则任务卡死；running 时 whenIdle 后补发）
+            followupDeferred(agent, message, "V4 ORDINARY(推进)");
+            diagLog(`[steer-diag] V4 ORDINARY(推进) 分支(queued): text="${text.slice(0, 30)}" status=${agent.status}`);
             return "queued";
           }
           // 纯确认词（嗯/好的/收到/明白/知道了）→ 仅回执（onInbound reaction 已打），不注入不打断
