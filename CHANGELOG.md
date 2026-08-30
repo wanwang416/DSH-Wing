@@ -1,6 +1,14 @@
 # Changelog
 
-> 里程碑记录：M0 → M4.1。commit 历史已脱敏，详见 `git log`。
+> 里程碑记录：M0 → M4.2。commit 历史已脱敏，详见 `git log`。
+
+## M4.2 · 扫码创建机器人 + Web 面板（2026-08-30）
+
+- `feat` `/setup` 扫码一键创建飞书机器人——官方 device-code 授权流程，自动配置权限与事件订阅、写入凭据并重启桥（换 bot 辅助入口）
+- `feat` Web 面板改造：DSH 网页左下角「Wing」面板首次扫码注册（后端 status/qr/setup 三 route + 前端侧栏面板 + 二维码实时轮询 + 连接状态机）
+- `feat` client 前端打包（slots 侧栏按钮 + 主题感知图标：深/浅背景双版本）
+- `feat` 品牌图标（DS + 翅膀，透明背景，内嵌打包）
+- `test` setup 核心流程 / panel route 单测 + 全量 562 通过
 
 ## M4.1 · P2 开源交付（2026-08-29）
 

@@ -239,6 +239,8 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
     tools: { register: vi.fn() },
     systemPrompt: { section: vi.fn() },
     effect: vi.fn((fn: () => unknown) => { h.effectFn = fn; return vi.fn(); }),
+    // M4.2：Web 面板子插件（webServer 缺失 → mock 静默跳过，不执行 callback）
+    inject: vi.fn(() => ({})),
     credentials: { resolve: vi.fn().mockResolvedValue(undefined) },
     userQuestions: { ask: vi.fn() },
     // P1-1：approval/request waterfall 注册（返回 dispose 供 cleanup）

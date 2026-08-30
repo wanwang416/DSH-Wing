@@ -85,6 +85,15 @@ export interface BridgeCommandServices {
     /** 生成诊断包；返回 ZIP 路径与大小 */
     generate(chatId: string): Promise<{ zipPath: string; size: number }>;
   };
+  /** M4.2 /setup 扫码建应用：启动后台注册流程并等待二维码就绪 */
+  setup?: {
+    /**
+     * 启动扫码创建应用流程（后台运行，非阻塞）。
+     * 返回授权链接；30s 内未就绪返回 undefined。
+     * 后台扫码完成后自动写凭据 + 重启 bridge + 发完成通知（由 index.ts 组装闭包实现）。
+     */
+    start(chatId: string): Promise<{ url: string; expireIn: number } | undefined>;
+  };
 }
 
 /** 桥命令定义（注册制：新命令 = 定义此对象 + 注册进 bridgeCommands Map） */

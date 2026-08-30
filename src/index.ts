@@ -58,6 +58,8 @@ import { resumeCommand } from "./commands/resume.js";
 import { workspaceCommand } from "./commands/workspace.js";
 import { steerCommand } from "./commands/steer.js";
 import { setupCommand } from "./commands/setup.js";
+import { createSetupFlow } from "./setup/setup-flow.js";
+import { createWingPanel, type WebServerLike } from "./web/panel.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { createDoctorPackage, pluginVersion } from "./doctor/package.js";
 import type { ApprovalOutcome, ApprovalRequest } from "@deepseek-ai/dsh-user-approval";
@@ -736,6 +738,39 @@ export function apply(ctx: any, rawConfig: unknown): void {
   // ---------- P0-3 命令注册（所有运行时对象已就绪） ----------
   // 注册制：6 个桥命令只注册进 Map，不改路由核心。commandServices 闭包延迟到此时才可访问 supervisor。
   const admService = ctx.get?.("agentDefaultModel");
+  // M4.2 /setup 核心流程（飞书 /setup 与 Web 面板共用；restart 闭包引用后文定义的 stop/startBridge）
+  const setupFlow = createSetupFlow({
+    persist: async (c) => { await credStore.set(cfg.credentialRef, c); },
+    restart: async () => { await stopBridge(); await startBridge(); },
+    notify: (chatId, appId, domain) => {
+      outbox.enqueue({
+        dedupeKey: `setup:done:${chatId}:${appId}`,
+        chatId,
+        kind: "text",
+        payload: {
+          kind: "text",
+          text: [
+            "✅ **机器人已就绪，连接已重启！**",
+            "",
+            `App ID：\`${appId}\``,
+            `域：${domain === "lark" ? "Lark（国际版）" : "Feishu（国内版）"}`,
+            `凭据已写入 \`${cfg.credentialRef}\`。`,
+            "",
+            "直接发消息试试。需要换机器人？重新 /setup，或 DSH 网页左下角扫码。",
+          ].join("\n"),
+        },
+      });
+    },
+    failNotify: (chatId, message) => {
+      outbox.enqueue({
+        dedupeKey: `setup:fail:${chatId}:${Date.now()}`,
+        chatId,
+        kind: "text",
+        payload: { kind: "text", text: `❌ 扫码建应用失败：${message}` },
+      });
+    },
+    logger,
+  });
   commandServices = {
     mapper: {
       size: () => mapper?.size() ?? 0,
@@ -850,6 +885,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
         return createDoctorPackage({ stateDir: dir, cfg, credential, pluginVersion: pluginVersion() });
       },
     },
+    // M4.2 /setup 扫码建应用（核心流程由 setupFlow 承担：后台注册 → 扫码 → 写凭据 → 重启桥 → 完成通知）
+    setup: {
+      start: (chatId) => setupFlow.start(chatId),
+    },
   };
   bridgeCommands.set("stop", stopCommand);
   bridgeCommands.set("new", newCommand);
@@ -936,6 +975,24 @@ export function apply(ctx: any, rawConfig: unknown): void {
     lifecycleStarted = false;
     logger.info?.("bridge stopped");
   };
+
+  // M4.2 Web 面板后端 route（status / qr / setup）。
+  // webServer 是 cordis service（dsh-host-webserver 提供，isolate 到 host）。
+  // 用 ctx.inject 声明依赖：测试等无 webServer 的 host 下子插件静默 INACTIVE
+  // （不崩主插件）；webServer 之后注册时 cordis 会自动激活本子插件。
+  ctx.inject(["webServer"], (webCtx: { webServer: WebServerLike }) => {
+    const panel = createWingPanel({
+      status,
+      resolveCredential: async () => credStore.resolve(cfg.credentialRef),
+      setup: {
+        start: (chatId) => setupFlow.start(chatId),
+        getActiveQr: () => setupFlow.getActiveQr(),
+        isBusy: () => setupFlow.isBusy(),
+      },
+      logger,
+    });
+    return panel.register(webCtx.webServer);
+  });
 
   ctx.effect(() => {
     void startBridge();
