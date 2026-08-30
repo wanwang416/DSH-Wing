@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/banner.png" alt="DSH-Wing Banner" width="100%" style="border-radius: 12px; margin-bottom: 16px;" />
+<img src="docs/assets/logo.png" alt="DSH-Wing Logo" width="220" style="margin-bottom: 4px;" />
 
-# 🪽 DSH-Wing
+# DSH-Wing
 
 ### **DeepSeek Harness 飞书原生插件 — 过程透明 · 插话不打断 · 完整桥能力**
 
@@ -13,6 +13,10 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tests](https://img.shields.io/badge/562%20tests-passing-22c55e?style=for-the-badge)](https://github.com/wanwang416/DSH-Wing/actions)
 [![DSH Plugin](https://img.shields.io/badge/DSH-Plugin-7c3aed?style=for-the-badge)](https://github.com/deepseek-ai/deepseek-harness)
+
+<br/>
+
+<img src="docs/assets/banner.png" alt="DSH-Wing Banner" width="100%" style="border-radius: 12px; margin-top: 8px;" />
 
 </div>
 
