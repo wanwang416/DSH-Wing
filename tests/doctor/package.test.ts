@@ -15,7 +15,7 @@ function tmpDir(): string {
 
 describe("doctor 脱敏纯函数", () => {
   it("mask：过短/空 → ***，长值保留前 4 位", () => {
-    expect(mask("cli_aa03ee45423bdd10")).toBe("cli_******");
+    expect(mask("cli_test1234567890ab")).toBe("cli_******");
     expect(mask("abc")).toBe("***");
     expect(mask(undefined)).toBe("***");
   });
