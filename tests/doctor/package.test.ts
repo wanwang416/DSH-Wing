@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import JSZip from "jszip";
-import { createDoctorPackage, mask, maskCfg, maskCredential } from "../../src/doctor/package.js";
+import { createDoctorPackage, mask, maskCfg, maskCredential, pluginVersion } from "../../src/doctor/package.js";
 import { DEFAULT_CONFIG, type WingConfig } from "../../src/config/defaults.js";
 
 function tmpDir(): string {
@@ -32,6 +32,14 @@ describe("doctor 脱敏纯函数", () => {
     const m = maskCfg(cfg);
     expect(m.bossOpenId).not.toContain("ou_boss");
     expect(m.permissionMode).toBe("workspace-write");
+  });
+
+  it("pluginVersion：从插件自身位置读版本（不依赖 cwd，DSH 进程 cwd 是 D:\\dsh）", () => {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as {
+      version: string;
+    };
+    expect(pluginVersion()).toBe(pkg.version);
+    expect(pluginVersion()).not.toBe("unknown");
   });
 });
 

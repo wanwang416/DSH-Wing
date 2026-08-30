@@ -7,7 +7,8 @@
  * 铁律：配置强制脱敏（app_secret/token/bossOpenId 打码），日志不含完整聊天记录。
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 import type { WingConfig } from "../config/defaults.js";
 import type { LarkCredential } from "../host/credentials.js";
@@ -55,15 +56,37 @@ export function maskCfg(cfg: WingConfig): Record<string, unknown> {
   return out;
 }
 
-/** 插件自身版本（读项目根 package.json） */
-export function pluginVersion(): string {
+/** 项目根：从插件自身文件位置向上找含 package.json 的最近目录。
+ *  不依赖 process.cwd()——DSH 进程的工作目录是 D:\dsh，不是插件目录。 */
+function projectRoot(): string | undefined {
   try {
-    const p = join(process.cwd(), "package.json");
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 6; i++) {
+      if (existsSync(join(dir, "package.json"))) return dir;
+      const parent = dirname(dir);
+      if (parent === dir) return undefined;
+      dir = parent;
+    }
+  } catch {
+    /* fallthrough */
+  }
+  return undefined;
+}
+
+/** 读 package.json 的 version；文件缺失/解析失败返回 unknown */
+function readVersion(p: string): string {
+  try {
     if (!existsSync(p)) return "unknown";
     return (JSON.parse(readFileSync(p, "utf8")) as { version?: string }).version ?? "unknown";
   } catch {
     return "unknown";
   }
+}
+
+/** 插件自身版本（读项目根 package.json） */
+export function pluginVersion(): string {
+  const root = projectRoot();
+  return root ? readVersion(join(root, "package.json")) : "unknown";
 }
 
 /** 读文件尾部 n 行；文件不存在/读失败返回 undefined（跳过收录） */
@@ -77,15 +100,10 @@ function tailLines(path: string, n: number): string | undefined {
   }
 }
 
-/** 从 node_modules 读依赖包版本；失败返回 unknown */
+/** 从项目根 node_modules 读依赖包版本；失败返回 unknown */
 function pkgVersion(name: string): string {
-  try {
-    const p = join(process.cwd(), "node_modules", name, "package.json");
-    if (!existsSync(p)) return "unknown";
-    return (JSON.parse(readFileSync(p, "utf8")) as { version?: string }).version ?? "unknown";
-  } catch {
-    return "unknown";
-  }
+  const root = projectRoot();
+  return root ? readVersion(join(root, "node_modules", name, "package.json")) : "unknown";
 }
 
 export function envInfo(opts: DoctorPackageOpts): Record<string, string> {
