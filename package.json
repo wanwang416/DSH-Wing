@@ -31,7 +31,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsdown",
+    "build:host": "tsc",
+    "build:client": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
