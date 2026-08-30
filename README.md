@@ -4,9 +4,9 @@
 
 # DSH-Wing
 
-### **DeepSeek Harness 飞书原生插件 — 过程透明 · 插话不打断 · 完整桥能力**
+### **A native Feishu (Lark) plugin for DeepSeek Harness — transparent streaming · non-interruptive follow-ups · full bridge capabilities**
 
-*A native Feishu (Lark) plugin for DeepSeek Harness: transparent streaming, non-interruptive follow-ups, and full bridge capabilities.*
+*DeepSeek Harness 飞书原生插件 — 过程透明 · 插话不打断 · 完整桥能力*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
@@ -22,71 +22,82 @@
 
 ---
 
-## ✨ 核心特性 / Core Features
+## ✨ Core Features / 核心特性
 
 <div align="center">
 <img src="docs/assets/streaming-ui.png" alt="Streaming Card UI" width="80%" style="border-radius: 12px; margin: 16px 0;" />
 </div>
 
-### 🎯 过程透明 / Transparent Streaming
-思考过程流式呈现，单卡打字机效果，告别黑盒。**CardKit 流式引擎**支持三级降级：CardKit 打字机 → 全量卡片更新 → 普通文本消息，确保任何环境下都能稳定输出。
+### 🎯 Transparent Streaming / 过程透明
 
-### 💬 插话不打断 / Non-Interruptive Follow-ups
-任务进行中可随时插话，主任务不丢上下文。**四类中断分类器**智能识别：
-- **COMMAND**（停止/改道）→ 立即中断
-- **QUESTION / CONFIRM**（疑问/确认）→ 排队注入，不打断主任务
-- **ORDINARY**（推进词/纯确认）→ 推进词注入，纯确认仅回执
-- 可通过 `DSH_WING_INTERRUPT_CLASSIFIER=0` 回退经典模式
+The agent's thinking is rendered as a single typewriter card — never a black box. The **CardKit streaming engine** supports three-level degradation: CardKit typewriter → full card update → plain text message, ensuring stable output in any environment.
+思考过程流式呈现，单卡打字机效果，告别黑盒。CardKit 流式引擎支持三级降级。
 
-### 🎛️ 交互卡片 / Interactive Cards
-- **单选卡**：`/preset` `/model` `/mode` `/permission` 一键切换
-- **审批卡**：危险操作四按钮（Allow Once / Session / Always / Deny），支持老板 `open_id` 限定，防止群聊他人越权批准
+### 💬 Non-Interruptive Follow-ups / 插话不打断
 
-### 🔒 权限控制 / Permission System
-三档权限粒度，默认保守：
-| 模式 | 说明 |
+Interject anytime during a running task; the main task keeps its context. The **four-class interrupt classifier** intelligently identifies:
+任务进行中可随时插话，主任务不丢上下文。四类中断分类器智能识别：
+- **COMMAND** (stop / redirect) → immediate interruption / 立即中断
+- **QUESTION / CONFIRM** (doubt / confirmation) → queued injection, does not interrupt the main task / 排队注入，不打断主任务
+- **ORDINARY** (progress word / pure confirmation) → progress-word injection, pure confirmation only acknowledges / 推进词注入，纯确认仅回执
+- Fallback to classic mode via `DSH_WING_INTERRUPT_CLASSIFIER=0` / 可通过环境变量回退经典模式
+
+### 🎛️ Interactive Cards / 交互卡片
+
+- **Single-select cards** — `/preset` `/model` `/mode` `/permission` one-tap switching / 单选卡一键切换
+- **Approval cards** — four buttons for dangerous operations (Allow Once / Session / Always / Deny), with boss `open_id` restriction to prevent unauthorized approval in group chats / 审批卡四按钮，支持老板 open_id 限定，防止群聊他人越权批准
+
+### 🔒 Permission System / 权限控制
+
+Three permission tiers, conservative by default / 三档权限粒度，默认保守：
+
+| Mode / 模式 | Description / 说明 |
 |------|------|
-| `read-only` | 只读，禁止任何写操作 |
-| `workspace-write` | **默认**，仅允许工作区内写入 |
-| `danger-full-access` | 完全访问，危险操作弹审批卡 |
+| `read-only` | Read-only, no write operations allowed / 只读，禁止任何写操作 |
+| `workspace-write` | **Default**, writes allowed only within the workspace / **默认**，仅允许工作区内写入 |
+| `danger-full-access` | Full access, dangerous operations trigger approval card / 完全访问，危险操作弹审批卡 |
 
-### 🧭 意图路由 / Intent Routing
-群聊命令 / 提问 / 闲聊智能分流，纯寒暄不误触发 agent。支持 `open` / `mention` / `keywords` / `reply` 四种群聊触发策略。
+### 🧭 Intent Routing / 意图路由
 
-### 🛡️ 可靠性 / Reliability
-- **断线补偿**：WS 断连期间消息不丢，重连后自动补偿
-- **撤回即停**：用户撤回消息 → 立即取消对应 agent 任务
-- **WAL 留痕**：入站消息预写日志，崩溃可恢复
-- **连接自愈**：WS 假死检测（60s ping timeout）+ 自动重连
-- **Outbox 重试**：出站消息失败自动重试，指数退避
+Group-chat commands, questions, and small talk are routed intelligently; pure greetings never trigger the agent. Supports four group-chat trigger strategies: `open` / `mention` / `keywords` / `reply`.
+群聊命令 / 提问 / 闲聊智能分流，纯寒暄不误触发 agent。支持四种群聊触发策略。
+
+### 🛡️ Reliability / 可靠性
+
+- **Disconnect compensation** — messages are not lost during WS disconnection, automatically compensated after reconnect / 断线补偿，WS 断连期间消息不丢，重连后自动补偿
+- **Stop on recall** — recalling a message immediately cancels the corresponding agent task / 撤回即停，用户撤回消息 → 立即取消对应 agent 任务
+- **WAL persistence** — inbound messages are pre-written to a log, recoverable after crash / WAL 留痕，入站消息预写日志，崩溃可恢复
+- **Self-healing reconnect** — WS hang detection (60s ping timeout) + automatic reconnect / 连接自愈，WS 假死检测 + 自动重连
+- **Outbox retry** — failed outbound messages are retried automatically with exponential backoff / Outbox 重试，出站消息失败自动重试，指数退避
 
 ---
 
-## 🏗️ 架构设计 / Architecture
+## 🏗️ Architecture / 架构设计
 
 <div align="center">
 <img src="docs/assets/architecture.png" alt="Architecture" width="85%" style="border-radius: 12px; margin: 16px 0;" />
 </div>
 
-### 三层架构 / Three-Layer Architecture
+### Three-Layer Architecture / 三层架构
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  平台接入层 / Platform Adapter Layer                      │
+│  Platform Adapter Layer / 平台接入层                      │
 │  ┌──────────┐  ┌──────────┐  ┌──────────────────────┐  │
 │  │ Feishu   │  │ WebSocket│  │ Event Dispatcher     │  │
 │  │ SDK      │  │ Client   │  │                      │  │
 │  └──────────┘  └──────────┘  └──────────────────────┘  │
 ├─────────────────────────────────────────────────────────┤
-│  核心层 / Core Engine Layer (平台无关)                    │
+│  Core Engine Layer / 核心层 (platform-agnostic / 平台无关)│
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ │
 │  │ Inbound  │ │ Session  │ │ Experience│ │ Outbound  │ │
 │  │ Pipeline │ │ Manager  │ │ Layer     │ │ Outbox    │ │
-│  │ (解析/去重│ │ (映射/持久│ │ (流式/插话│ │ (重试/降级│ │
-│  │  /批处理) │ │  化/序列化)│ │ /工具可见)│ │  /分片)   │ │
+│  │(parse/   │ │(map/     │ │(stream/  │ │(retry/    │ │
+│  │ dedup/   │ │ persist/ │ │ interject│ │ degrade/  │ │
+│  │ batch)   │ │ serialize)│ │ /tools)  │ │ shard)    │ │
 │  └──────────┘ └──────────┘ └──────────┘ └───────────┘ │
 ├─────────────────────────────────────────────────────────┤
-│  Agent 驱动层 / Agent Driver Layer (DSH 原生)            │
+│  Agent Driver Layer / Agent 驱动层 (DSH-native / DSH 原生)│
 │  ┌──────────┐  ┌──────────┐  ┌──────────────────────┐  │
 │  │ DSH Agent│  │ Tool Call│  │ LLM / Reasoning      │  │
 │  │ Driver   │  │ Stream   │  │                      │  │
@@ -94,110 +105,112 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 消息链路 / Message Flow
+### Message Flow / 消息链路
 
 ```
-飞书消息 → WS → Dispatcher → Session Mapper → DSH Agent
-    → Session Events (6种) → Forwarder → Experience
-    → Sender / Outbox → 飞书回复
+Feishu message → WS → Dispatcher → Session Mapper → DSH Agent
+    → Session Events (6 types) → Forwarder → Experience
+    → Sender / Outbox → Feishu reply
 ```
 
 ---
 
-## 🚀 快速开始 / Quick Start
+## 🚀 Quick Start / 快速开始
 
-### 前置要求 / Prerequisites
+### Prerequisites / 前置要求
 
 - **Node.js >= 24.0.0**
-- DeepSeek Harness (DSH) 运行环境
-- 飞书自建应用（App ID + App Secret）
+- DeepSeek Harness (DSH) runtime / DSH 运行环境
+- Feishu self-built application (App ID + App Secret) / 飞书自建应用
 
-### 安装 / Installation
+### Installation / 安装
 
 ```bash
-# 克隆仓库
+# Clone the repository / 克隆仓库
 git clone https://github.com/wanwang416/DSH-Wing.git
 cd DSH-Wing
 
-# 安装依赖
+# Install dependencies / 安装依赖
 npm install
 
-# 构建（host tsc + client tsdown）
+# Build (host tsc + client tsdown) / 构建
 npm run build
 ```
 
-### 配置 / Configuration
+### Configuration / 配置
 
 ```bash
-# 1. 复制配置模板
+# 1. Copy the config template / 复制配置模板
 cp cordis.patch.example.yml cordis.patch.yml
 
-# 2. 编辑配置
-#    - workspaceRoot: 你的工作区路径
-#    - groupPolicy: 群聊触发策略 (open/mention/keywords/reply)
-#    - permissionMode: 权限模式 (read-only/workspace-write/danger-full-access)
+# 2. Edit the config / 编辑配置
+#    - workspaceRoot: your workspace path / 你的工作区路径
+#    - groupPolicy: group-chat trigger strategy (open/mention/keywords/reply) / 群聊触发策略
+#    - permissionMode: permission mode (read-only/workspace-write/danger-full-access) / 权限模式
 ```
 
-**凭据配置**（二选一）：
+**Credential configuration** (choose one) / **凭据配置**（二选一）：
 
-**方式 A — DSH 凭据系统（推荐）：**
+**Option A — DSH credential system (recommended) / 方式 A — DSH 凭据系统（推荐）：**
 ```bash
-# 在 DSH 凭据系统中注册
+# Register in the DSH credential system / 在 DSH 凭据系统中注册
 # credentialRef: WING_LARK_APP
-# 值: {"appId":"cli_xxx","appSecret":"xxx","domain":"feishu"}
+# value: {"appId":"cli_xxx","appSecret":"xxx","domain":"feishu"}
 ```
 
-**方式 B — 环境变量：**
+**Option B — Environment variables / 方式 B — 环境变量：**
 ```bash
 export DSH_WING_APP_ID=cli_xxxxxxxxxxxx
 export DSH_WING_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-### 初始化飞书应用 / Setup
+### Setup Feishu Application / 初始化飞书应用
 
 ```bash
+# Run interactive setup (generates a QR code, scan to register the Feishu app)
 # 运行交互式 setup（生成 QR 码，扫码注册飞书应用）
 npx dsh-wing setup
 
+# Or trigger via the /setup command in a Feishu chat
 # 或使用 /setup 命令在飞书聊天中触发
 ```
 
-### 诊断 / Diagnostics
+### Diagnostics / 诊断
 
 ```bash
-# 环境检查
+# Environment check / 环境检查
 npx dsh-wing doctor
 
-# WebSocket 连接测试
+# WebSocket connection test / WebSocket 连接测试
 node scripts/diag-ws.mjs
 
-# 消息监听测试
+# Message listener test / 消息监听测试
 node scripts/diag-listen.mjs
 ```
 
 ---
 
-## 📋 命令参考 / Command Reference
+## 📋 Command Reference / 命令参考
 
-| 命令 | 说明 |
+| Command / 命令 | Description / 说明 |
 |------|------|
-| `/preset` | 切换 Agent Preset（code / general / ...） |
-| `/model` | 切换 LLM 模型 |
-| `/mode` | 切换运行模式 |
-| `/permission` | 切换权限模式 |
-| `/resume` | 恢复历史会话 |
-| `/workspace` | 查看/切换工作区 |
-| `/steer` | 温和打断当前任务 |
-| `/stop` | 立即停止当前任务 |
-| `/setup` | 初始化飞书应用配置 |
-| `/status` | 查看当前状态 |
-| `/doctor` | 环境诊断检查 |
-| `/new` | 开启新会话 |
-| `/help` | 显示帮助 |
+| `/preset` | Switch Agent Preset (code / general / ...) / 切换 Agent Preset |
+| `/model` | Switch LLM model / 切换 LLM 模型 |
+| `/mode` | Switch runtime mode / 切换运行模式 |
+| `/permission` | Switch permission mode / 切换权限模式 |
+| `/resume` | Resume a historical session / 恢复历史会话 |
+| `/workspace` | View / switch workspace / 查看/切换工作区 |
+| `/steer` | Gently interrupt the current task / 温和打断当前任务 |
+| `/stop` | Immediately stop the current task / 立即停止当前任务 |
+| `/setup` | Initialize Feishu application config / 初始化飞书应用配置 |
+| `/status` | View current status / 查看当前状态 |
+| `/doctor` | Environment diagnostic check / 环境诊断检查 |
+| `/new` | Start a new session / 开启新会话 |
+| `/help` | Show help / 显示帮助 |
 
 ---
 
-## ⚙️ 配置详解 / Configuration
+## ⚙️ Configuration Details / 配置详解
 
 ### cordis.patch.yml
 
@@ -207,118 +220,118 @@ node scripts/diag-listen.mjs
       name: 'dsh-wing'
       config:
         enabled: true
-        credentialRef: WING_LARK_APP     # DSH 凭据引用名
-        appId: ''                          # 或环境变量 DSH_WING_APP_ID
-        appSecret: ''                      # 或环境变量 DSH_WING_APP_SECRET
+        credentialRef: WING_LARK_APP     # DSH credential reference name / DSH 凭据引用名
+        appId: ''                          # or env var DSH_WING_APP_ID / 或环境变量
+        appSecret: ''                      # or env var DSH_WING_APP_SECRET / 或环境变量
         groupPolicy: mention               # open/mention/keywords/reply
-        workspaceRoot: /path/to/workspace  # 工作区根目录
+        workspaceRoot: /path/to/workspace  # workspace root / 工作区根目录
         streaming:
-          enabled: true                     # 默认开启流式
-          flushMs: 500                      # 流式刷新间隔
-        permissionMode: workspace-write     # 默认保守权限
-        turnTimeoutMs: 600000              # 轮次超时（10分钟）
-        agentPreset: code                   # 默认 Agent Preset
-        bossOpenId: ''                      # 老板 open_id（审批卡限定）
-        steerDiagLogPath: ''                # steer 诊断日志路径（默认关闭）
+          enabled: true                     # streaming enabled by default / 默认开启流式
+          flushMs: 500                      # streaming flush interval / 流式刷新间隔
+        permissionMode: workspace-write     # conservative by default / 默认保守权限
+        turnTimeoutMs: 600000              # turn timeout (10 minutes) / 轮次超时（10分钟）
+        agentPreset: code                   # default Agent Preset / 默认 Agent Preset
+        bossOpenId: ''                      # boss open_id (approval card restriction) / 老板 open_id
+        steerDiagLogPath: ''                # steer diagnostic log path (off by default) / steer 诊断日志路径
 ```
 
-### 环境变量 / Environment Variables
+### Environment Variables / 环境变量
 
-| 变量 | 说明 | 默认 |
+| Variable / 变量 | Description / 说明 | Default |
 |------|------|------|
-| `DSH_WING_APP_ID` | 飞书 App ID 覆盖 | — |
-| `DSH_WING_APP_SECRET` | 飞书 App Secret 覆盖 | — |
-| `DSH_WING_INTERRUPT_CLASSIFIER` | 中断分类器开关（`0`=关闭） | `1` |
-| `DSH_WING_SDK_LOG` | 飞书 SDK 日志文件路径 | — |
-| `DSH_HOME` | DSH 主目录（诊断脚本用） | — |
+| `DSH_WING_APP_ID` | Feishu App ID override / 飞书 App ID 覆盖 | — |
+| `DSH_WING_APP_SECRET` | Feishu App Secret override / 飞书 App Secret 覆盖 | — |
+| `DSH_WING_INTERRUPT_CLASSIFIER` | Interrupt classifier switch (`0`=off) / 中断分类器开关 | `1` |
+| `DSH_WING_SDK_LOG` | Feishu SDK log file path / 飞书 SDK 日志文件路径 | — |
+| `DSH_HOME` | DSH home directory (for diagnostic scripts) / DSH 主目录（诊断脚本用） | — |
 
 ---
 
-## 🛠️ 开发 / Development
+## 🛠️ Development / 开发
 
 ```bash
-# 类型检查
+# Type check / 类型检查
 npm run typecheck
 
-# 仅构建 host（tsc）
+# Build host only (tsc) / 仅构建 host
 npm run build:host
 
-# 仅构建 client（tsdown / rolldown）
+# Build client only (tsdown / rolldown) / 仅构建 client
 npm run build:client
 
-# 完整构建（host + client）
+# Full build (host + client) / 完整构建
 npm run build
 
-# 运行测试
+# Run tests / 运行测试
 npm test
 
-# 监听模式测试
+# Watch mode tests / 监听模式测试
 npm run test:watch
 
-# 覆盖率报告
+# Coverage report / 覆盖率报告
 npm run coverage
 ```
 
-### 项目结构 / Project Structure
+### Project Structure / 项目结构
 
 ```
 DSH-Wing/
 ├── src/
-│   ├── index.ts              # 插件入口，组装所有模块
-│   ├── agent/                # Agent 驱动层
-│   │   ├── caller.ts         # Agent 调用封装
-│   │   ├── experience.ts     # 体验契约（流式/插话/工具可见）
-│   │   ├── forwarder.ts      # 事件转发器
-│   │   ├── intent.ts         # 意图识别
-│   │   ├── model.ts          # 模型管理
-│   │   ├── permission.ts     # 权限判断
-│   │   ├── preset.ts         # Preset 管理
-│   │   ├── turn-supervisor.ts # 轮次监督器
-│   │   └── user-questions.ts # 用户问题处理
-│   ├── client/               # 前端客户端（DSH ModuleLoader）
+│   ├── index.ts              # Plugin entry, assembles all modules / 插件入口
+│   ├── agent/                # Agent driver layer / Agent 驱动层
+│   │   ├── caller.ts         # Agent call wrapper / Agent 调用封装
+│   │   ├── experience.ts     # Experience contract (stream/interject/tool-visible) / 体验契约
+│   │   ├── forwarder.ts      # Event forwarder / 事件转发器
+│   │   ├── intent.ts         # Intent recognition / 意图识别
+│   │   ├── model.ts          # Model management / 模型管理
+│   │   ├── permission.ts     # Permission judgment / 权限判断
+│   │   ├── preset.ts         # Preset management / Preset 管理
+│   │   ├── turn-supervisor.ts # Turn supervisor / 轮次监督器
+│   │   └── user-questions.ts # User question handling / 用户问题处理
+│   ├── client/               # Frontend client (DSH ModuleLoader) / 前端客户端
 │   │   ├── index.ts
 │   │   └── icons.ts
-│   ├── commands/             # 斜杠命令
-│   ├── config/               # 配置默认值
-│   ├── doctor/               # 环境诊断
-│   ├── host/                 # 平台接入层
-│   │   ├── client.ts         # 飞书 SDK 客户端
-│   │   ├── credentials.ts    # 凭据管理
-│   │   ├── quota.ts          # 配额治理
-│   │   ├── status.ts         # 状态存储
-│   │   ├── supervisor.ts     # 连接监督器
-│   │   └── websocket.ts      # WebSocket 传输
-│   ├── inbound/              # 入站管道
-│   │   ├── batching.ts       # 消息批处理
-│   │   ├── chat-type.ts      # 聊天类型判断
-│   │   ├── compensation.ts   # 断线补偿
-│   │   ├── dedup.ts          # 消息去重
-│   │   ├── dispatcher.ts     # 事件分发
-│   │   ├── event-handler.ts  # 事件处理器
-│   │   ├── group-policy.ts   # 群聊策略
-│   │   ├── interrupt-classify.ts # 中断分类器
-│   │   ├── parser.ts         # 消息解析
-│   │   └── wal.ts            # 预写日志
-│   ├── interactive/          # 交互卡片
-│   │   ├── approval.ts       # 审批卡
-│   │   ├── reaction.ts       # 表情回应
-│   │   ├── router.ts         # 交互路由
-│   │   └── selector.ts       # 单选卡
-│   ├── outbound/             # 出站管道
-│   │   ├── cardkit.ts        # CardKit 封装
-│   │   ├── chunker.ts        # 消息分片
-│   │   ├── fallback.ts       # 降级策略
-│   │   ├── outbox.ts         # 出站队列
-│   │   ├── sender.ts         # 消息发送
-│   │   ├── streaming-card.ts # 流式卡片引擎
-│   │   └── tool-step.ts      # 工具步骤渲染
-│   ├── session/              # 会话管理
-│   ├── setup/                # 初始化流程
-│   └── web/                  # Web 面板
-├── tests/                    # 562 个单元测试
-├── scripts/                  # 诊断脚本
-├── docs/assets/              # 文档素材
-├── .github/workflows/ci.yml  # CI 配置
+│   ├── commands/             # Slash commands / 斜杠命令
+│   ├── config/               # Config defaults / 配置默认值
+│   ├── doctor/               # Environment diagnostics / 环境诊断
+│   ├── host/                 # Platform adapter layer / 平台接入层
+│   │   ├── client.ts         # Feishu SDK client / 飞书 SDK 客户端
+│   │   ├── credentials.ts    # Credential management / 凭据管理
+│   │   ├── quota.ts          # Quota governance / 配额治理
+│   │   ├── status.ts         # Status storage / 状态存储
+│   │   ├── supervisor.ts     # Connection supervisor / 连接监督器
+│   │   └── websocket.ts      # WebSocket transport / WebSocket 传输
+│   ├── inbound/              # Inbound pipeline / 入站管道
+│   │   ├── batching.ts       # Message batching / 消息批处理
+│   │   ├── chat-type.ts      # Chat type judgment / 聊天类型判断
+│   │   ├── compensation.ts   # Disconnect compensation / 断线补偿
+│   │   ├── dedup.ts          # Message dedup / 消息去重
+│   │   ├── dispatcher.ts     # Event dispatcher / 事件分发
+│   │   ├── event-handler.ts  # Event handler / 事件处理器
+│   │   ├── group-policy.ts   # Group chat policy / 群聊策略
+│   │   ├── interrupt-classify.ts # Interrupt classifier / 中断分类器
+│   │   ├── parser.ts         # Message parser / 消息解析
+│   │   └── wal.ts            # Write-ahead log / 预写日志
+│   ├── interactive/          # Interactive cards / 交互卡片
+│   │   ├── approval.ts       # Approval card / 审批卡
+│   │   ├── reaction.ts       # Reaction response / 表情回应
+│   │   ├── router.ts         # Interaction router / 交互路由
+│   │   └── selector.ts       # Single-select card / 单选卡
+│   ├── outbound/             # Outbound pipeline / 出站管道
+│   │   ├── cardkit.ts        # CardKit wrapper / CardKit 封装
+│   │   ├── chunker.ts        # Message chunker / 消息分片
+│   │   ├── fallback.ts       # Fallback strategy / 降级策略
+│   │   ├── outbox.ts         # Outbound queue / 出站队列
+│   │   ├── sender.ts         # Message sender / 消息发送
+│   │   ├── streaming-card.ts # Streaming card engine / 流式卡片引擎
+│   │   └── tool-step.ts      # Tool step rendering / 工具步骤渲染
+│   ├── session/              # Session management / 会话管理
+│   ├── setup/                # Setup flow / 初始化流程
+│   └── web/                  # Web panel / Web 面板
+├── tests/                    # 562 unit tests / 562 个单元测试
+├── scripts/                  # Diagnostic scripts / 诊断脚本
+├── docs/assets/              # Documentation assets / 文档素材
+├── .github/workflows/ci.yml  # CI config / CI 配置
 ├── package.json
 ├── tsconfig.json
 ├── tsdown.config.ts
@@ -327,42 +340,44 @@ DSH-Wing/
 
 ---
 
-## 🗺️ 路线图 / Roadmap
+## 🗺️ Roadmap / 路线图
 
-| 里程碑 | 内容 | 状态 |
+| Milestone / 里程碑 | Content / 内容 | Status / 状态 |
 |--------|------|------|
-| **M0** | 骨架 + API 签名 + 插话验证 | ✅ 完成 |
-| **M1** | 最小可用 + 体验先行（流式 / 插话 / 权限保守 / Outbox） | ✅ 完成 |
-| **M2** | 可靠性 + 富文本 + 全事件 | ✅ 完成 |
-| **M3** | 交互 + 权限 + 插话增强（CardKit 流式 / ToolStep 富卡片） | ✅ 完成 |
-| **M4** | 易用性 + 诊断 + 完整度补齐 | ✅ 完成 |
-| **M4.1** | 单选卡 + 审批卡 + 意图桥 + 第二批命令 | ✅ 完成 · 562 tests |
-| **M5** | 多平台扩展（Discord / Telegram / Slack） | 📋 规划中 |
-| **M6** | 插件市场 + 可视化配置面板 | 📋 规划中 |
+| **M0** | Skeleton + API signatures + interjection validation / 骨架 + API 签名 + 插话验证 | ✅ Done / 完成 |
+| **M1** | MVP + experience-first (streaming / interjection / conservative permissions / Outbox) / 最小可用 + 体验先行 | ✅ Done / 完成 |
+| **M2** | Reliability + rich text + full events / 可靠性 + 富文本 + 全事件 | ✅ Done / 完成 |
+| **M3** | Interaction + permissions + interjection enhancement (CardKit streaming / ToolStep rich cards) / 交互 + 权限 + 插话增强 | ✅ Done / 完成 |
+| **M4** | Usability + diagnostics + completeness / 易用性 + 诊断 + 完整度补齐 | ✅ Done / 完成 |
+| **M4.1** | Single-select cards + approval cards + intent bridge + second batch of commands / 单选卡 + 审批卡 + 意图桥 + 第二批命令 | ✅ Done · 562 tests |
+| **M4.2** | `/doctor` diagnostic package + Web QR-code setup panel / doctor 诊断包 + Web 扫码面板 | ✅ Done / 完成 |
+| **M5** | Multi-platform expansion (Discord / Telegram / Slack) / 多平台扩展 | 📋 Planned / 规划中 |
+| **M6** | Plugin marketplace + visual configuration panel / 插件市场 + 可视化配置面板 | 📋 Planned / 规划中 |
 
 ---
 
-## 🤝 贡献 / Contributing
+## 🤝 Contributing / 贡献
 
-欢迎提交 Issue 和 Pull Request！
+Issues and Pull Requests are welcome! / 欢迎提交 Issue 和 Pull Request！
 
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
+1. Fork the repository / Fork 本仓库
+2. Create a feature branch (`git checkout -b feature/AmazingFeature`) / 创建特性分支
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`) / 提交更改
+4. Push to the branch (`git push origin feature/AmazingFeature`) / 推送到分支
+5. Open a Pull Request / 开启 Pull Request
 
 ---
 
-## 📄 许可证 / License
+## 📄 License / 许可证
 
+This project is licensed under the [MIT License](LICENSE).
 本项目采用 [MIT License](LICENSE) 开源协议。
 
 ---
 
 <div align="center">
 
-**用 ❤️ 和 TypeScript 构建**
+**Built with ❤️ and TypeScript / 用 ❤️ 和 TypeScript 构建**
 
 *Powered by DeepSeek Harness · Feishu Open Platform*
 
