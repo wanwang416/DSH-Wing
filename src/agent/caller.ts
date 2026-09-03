@@ -12,7 +12,6 @@ import { toSessionEventOut, type SessionEventOut } from "./forwarder.js";
 import { applyPermission } from "./permission.js";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { appendFileSync } from "node:fs";
-import { join as pathJoin, basename } from "node:path";
 import type { PermissionMode } from "../config/defaults.js";
 
 export interface CreateAgentDeps {
@@ -49,11 +48,17 @@ export interface WingAgentHandle {
 
 /** 创建 agent（sessionId = feishu:<chatId>:<random8>:0） */
 /** workspace attach（铁律：session 必须归属工作区，否则 DSH 无法正确管理/恢复） */
+/** 跨平台 basename：兼容 Windows 反斜杠与 POSIX 路径（Linux CI 上 node:path.basename 不识别 Windows 盘符路径） */
+function basenameAny(p: string): string {
+  const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? "";
+}
+
 async function attachWorkspace(ctx: any, cwd: string, sessionId: string, logger?: { warn?: (m: string) => void; info?: (m: string) => void }): Promise<void> {
   try {
     const workspaces = ctx.get?.("workspaceRegistry");
     if (workspaces?.create) {
-      const entity = await workspaces.create(cwd, basename(cwd));
+      const entity = await workspaces.create(cwd, basenameAny(cwd));
       if (entity?.attachSession) {
         await entity.attachSession(sessionId);
         logger?.info?.(`workspace attach: ${sessionId} -> ${cwd}`);
