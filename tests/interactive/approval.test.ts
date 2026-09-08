@@ -5,7 +5,8 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createApprovalBridge, buildApprovalCard, chatIdFromAgentId } from "../../src/interactive/approval.js";
+import { createApprovalBridge, buildApprovalCard, buildApprovalSettledCard, chatIdFromAgentId } from "../../src/interactive/approval.js";
+import { messageIdOfRes } from "../../src/agent/user-questions.js";
 
 function tmpFile(): string {
   const dir = mkdtempSync(join(tmpdir(), "wing-approval-"));
@@ -25,18 +26,22 @@ const req = (over: Record<string, unknown> = {}) => ({
 const next = vi.fn(async () => "unavailable" as const);
 
 function mkBridge(over: Record<string, unknown> = {}) {
-  const sendCard = vi.fn();
+  // Bug3b：sendCard 须 resolve 返回 message_id（sender.sendCard 直发 → messageIdOf 提取）；updateCard 供收口断言
+  const sendCard = vi.fn().mockResolvedValue({ data: { message_id: "om_msg" } });
+  const updateCard = vi.fn().mockResolvedValue(undefined);
   const sendText = vi.fn();
   const logger = { info: vi.fn(), warn: vi.fn() };
   const bridge = createApprovalBridge({
     sendCard,
+    updateCard,
+    messageIdOf: messageIdOfRes,
     sendText,
     memoryFile: memFile,
     timeoutMs: 1000,
     logger,
     ...over,
   } as any);
-  return { bridge, sendCard, sendText, logger };
+  return { bridge, sendCard, updateCard, sendText, logger };
 }
 
 describe("buildApprovalCard", () => {
@@ -152,10 +157,9 @@ describe("approval answer（waterfall）", () => {
   });
 
   it("发卡抛错 → unavailable（fail-closed）", async () => {
-    const { bridge } = mkBridge();
-    const sendCard = vi.fn(() => { throw new Error("send boom"); });
-    const b2 = createApprovalBridge({ sendCard, sendText: vi.fn(), memoryFile: memFile, logger: { warn: vi.fn() } } as any);
-    const outcome = await b2.answer(req() as any, next as any);
+    const throwing = vi.fn(() => { throw new Error("send boom"); });
+    const { bridge } = mkBridge({ sendCard: throwing });
+    const outcome = await bridge.answer(req() as any, next as any);
     expect(outcome).toBe("unavailable");
   });
 });
@@ -223,5 +227,85 @@ describe("onCardAction（四按钮 + 老板限定）", () => {
     expect(existsSync(memFile)).toBe(true);
     const raw = JSON.parse(readFileSync(memFile, "utf8"));
     expect(raw["oc_1:bash"]).toContain("bash");
+  });
+});
+
+describe("Bug3b：决策后收口换状态卡（不再停留可操作界面）", () => {
+  // flush 让 sendCard(mockResolvedValue) 的 .then 捕获 message_id（真实场景用户点击远晚于发送，天然满足）
+  const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+
+  it("allow-once → 卡替换成「✅ 已允许」状态卡", async () => {
+    const { bridge, sendCard, updateCard } = mkBridge({ bossOpenId: "ou_boss" });
+    const p = bridge.answer(req() as any, next as any);
+    await flush();
+    const entryId = /approval:(a\d+_\d+)/.exec(JSON.stringify(sendCard.mock.calls[0][1]) ?? "")?.[1];
+    expect(entryId).toBeDefined();
+    expect(bridge.onCardAction("oc_1", `approval:${entryId}:allow-once`, "ou_boss")).toBe(true);
+    expect(await p).toBe("allowed-once");
+    // 收口：以已捕获的 message_id + 状态卡 JSON 调 updateCard
+    expect(updateCard).toHaveBeenCalledTimes(1);
+    const [msgId, cardJson] = updateCard.mock.calls[0] as [string, string];
+    expect(msgId).toBe("om_msg");
+    const card = JSON.parse(cardJson);
+    expect((card.header as any).template).toBe("green");
+    expect((card.header as any).title.content).toContain("已允许");
+    expect((card.body as any).elements[0].content).toContain("bash");
+  });
+
+  it("deny → 卡替换成「❌ 已拒绝」状态卡", async () => {
+    const { bridge, sendCard, updateCard } = mkBridge({ bossOpenId: "ou_boss" });
+    const p = bridge.answer(req() as any, next as any);
+    await flush();
+    const entryId = /approval:(a\d+_\d+)/.exec(JSON.stringify(sendCard.mock.calls[0][1]) ?? "")?.[1];
+    expect(bridge.onCardAction("oc_1", `approval:${entryId}:deny`, "ou_boss")).toBe(true);
+    expect(await p).toBe("rejected");
+    expect(updateCard).toHaveBeenCalledTimes(1);
+    const [, cardJson] = updateCard.mock.calls[0] as [string, string];
+    const card = JSON.parse(cardJson);
+    expect((card.header as any).template).toBe("red");
+    expect((card.header as any).title.content).toContain("已拒绝");
+  });
+
+  it("signal abort → 卡替换成「⏰ 已失效」状态卡", async () => {
+    const ac = new AbortController();
+    const { bridge, sendCard, updateCard } = mkBridge();
+    const p = bridge.answer({ ...req(), signal: ac.signal } as any, next as any);
+    await flush();
+    ac.abort();
+    expect(await p).toBe("cancelled");
+    expect(updateCard).toHaveBeenCalledTimes(1);
+    const [, cardJson] = updateCard.mock.calls[0] as [string, string];
+    const card = JSON.parse(cardJson);
+    expect((card.header as any).template).toBe("grey");
+    expect((card.header as any).title.content).toContain("已失效");
+  });
+});
+
+describe("buildApprovalSettledCard（纯函数）", () => {
+  it("allowed-once → ✅ 已允许 / green", () => {
+    const c = buildApprovalSettledCard({ toolName: "bash", outcome: "allowed-once" });
+    expect((c.header as any).template).toBe("green");
+    expect((c.header as any).title.content).toContain("已允许");
+  });
+  it("rejected → ❌ 已拒绝 / red", () => {
+    const c = buildApprovalSettledCard({ toolName: "bash", outcome: "rejected" });
+    expect((c.header as any).template).toBe("red");
+    expect((c.header as any).title.content).toContain("已拒绝");
+  });
+  it("cancelled → ⏰ 已失效 / grey", () => {
+    const c = buildApprovalSettledCard({ toolName: "bash", outcome: "cancelled" });
+    expect((c.header as any).template).toBe("grey");
+    expect((c.header as any).title.content).toContain("已失效");
+  });
+  it("unavailable → ⚠️ 发送失败 / red", () => {
+    const c = buildApprovalSettledCard({ toolName: "bash", outcome: "unavailable" });
+    expect((c.header as any).template).toBe("red");
+    expect((c.header as any).title.content).toContain("发送失败");
+  });
+  it("收口卡无按钮（body 仅一条 markdown）", () => {
+    const c = buildApprovalSettledCard({ toolName: "bash", outcome: "allowed-once" });
+    const els = (c.body as any).elements as any[];
+    expect(els).toHaveLength(1);
+    expect(els[0].tag).toBe("markdown");
   });
 });

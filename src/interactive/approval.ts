@@ -68,8 +68,12 @@ export type ApprovalMemory = ReturnType<typeof createApprovalMemory>;
 export const APPROVAL_OP_PREFIX = "approval:";
 
 export interface ApprovalBridgeDeps {
-  /** 发审批卡（sender.sendCard） */
-  sendCard(chatId: string, card: Record<string, unknown>): unknown;
+  /** 发审批卡（Bug3b 起直发 sender.sendCard → 返回 SDK 响应以取 message_id；原 outbox 已弃） */
+  sendCard(chatId: string, card: Record<string, unknown>): Promise<unknown>;
+  /** 更新已发送审批卡（决策/超时后收口换状态卡，Bug3b） */
+  updateCard(messageId: string, cardJson: string): Promise<unknown>;
+  /** 从 sendCard 响应提取 message_id（对齐提问桥 messageIdOf，Bug3b） */
+  messageIdOf(res: unknown): string | undefined;
   /** 审批结果回执（拒绝/超时提示，outbox text） */
   sendText(chatId: string, text: string): unknown;
   /** 老板 open_id（WingConfig.bossOpenId；未配置 → 单用户宽松 + warn 一次，拍板④强校验依赖配置） */
@@ -124,6 +128,23 @@ export function buildApprovalCard(opts: { entryId: string; toolName: string; rea
   };
 }
 
+/** 构建审批「收口」状态卡（Bug3b：决策/超时后替换原四按钮卡，不再停留在可操作界面） */
+export function buildApprovalSettledCard(opts: { toolName: string; outcome: ApprovalOutcome }): Record<string, unknown> {
+  const table: Record<ApprovalOutcome, { emoji: string; title: string; template: string; body: string }> = {
+    "allowed-once": { emoji: "✅", title: "已允许", template: "green", body: `已放行 **${opts.toolName}** 本次执行。` },
+    rejected: { emoji: "❌", title: "已拒绝", template: "red", body: `已拒绝 **${opts.toolName}** 执行。` },
+    cancelled: { emoji: "⏰", title: "已失效", template: "grey", body: `**${opts.toolName}** 请求已失效（超时或中断）。` },
+    unavailable: { emoji: "⚠️", title: "发送失败", template: "red", body: `审批卡发送失败，**${opts.toolName}** 请求未放行（fail-closed）。` },
+  };
+  const m = table[opts.outcome];
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content: `${m.emoji} 操作审批 · ${m.title}` }, template: m.template },
+    body: { elements: [{ tag: "markdown", content: m.body }] },
+  };
+}
+
 /** 从 agent.id 反推 chatId（本插件 sessionId = feishu:<chatId>:<runNonce>:<gen>）；非本插件 → undefined */
 export function chatIdFromAgentId(agentId: string): string | undefined {
   if (!agentId.startsWith("feishu:")) return undefined;
@@ -160,7 +181,10 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
     // 无记忆 → 发审批卡，等用户决策（超时/abort → cancelled，fail-closed）
     return await new Promise<ApprovalOutcome>((resolve) => {
       const entryId = `a${++entryCounter}_${Date.now()}`;
+      const toolName = req.toolName;
       let settled = false;
+      // ★ Bug3b：记录已发卡 message_id，供 settle 决策后 updateCard 收口换状态卡
+      let sentCardMessageId: string | undefined;
       // timer 先声明（settle 闭包引用；TDZ 安全——settle 只在事件回调/超时/abort 时被调，彼时已赋值）
       let timer: ReturnType<typeof setTimeout> | undefined;
       const settle = (outcome: ApprovalOutcome): void => {
@@ -168,24 +192,38 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
         settled = true;
         if (timer) clearTimeout(timer);
         pending.delete(entryId);
+        // ★ Bug3b：收口——把原四按钮卡替换成状态卡（✅已允许/❌已拒绝/⏰已失效），不再停留可操作界面
+        if (sentCardMessageId) {
+          void deps
+            .updateCard(sentCardMessageId, JSON.stringify(buildApprovalSettledCard({ toolName, outcome })))
+            .catch(() => void 0);
+        }
         resolve(outcome);
       };
-      const entry: PendingEntry = { chatId, toolName: req.toolName, settle };
+      const entry: PendingEntry = { chatId, toolName, settle };
       pending.set(entryId, entry);
 
+      // timer 与 abort listener 同步挂好（不依赖 sendCard resolve：
+      //   ① abort 即时性——signal abort 在发送完成前也能取消，fail-closed；
+      //   ② 超时窗口含发送过程，维持原「发卡后立即计时」语义）
+      timer = setTimeout(() => settle("cancelled"), deps.timeoutMs ?? 300_000);
+      timer.unref?.();
+      req.signal?.addEventListener("abort", () => settle("cancelled"), { once: true });
       try {
-        deps.sendCard(
-          chatId,
-          buildApprovalCard({ entryId, toolName: req.toolName, reason: req.reason, bossOpenId: deps.bossOpenId }),
-        );
-        // 超时 → cancelled（不误放行）
-        timer = setTimeout(() => settle("cancelled"), deps.timeoutMs ?? 300_000);
-        timer.unref?.();
-        // 宿主 abort（turn 结束/取消）→ cancelled
-        req.signal?.addEventListener("abort", () => settle("cancelled"), { once: true });
+        // Bug3b：审批卡直发 sender.sendCard → resolve 后捕获 message_id，供 settle 决策后收口换状态卡
+        void deps
+          .sendCard(chatId, buildApprovalCard({ entryId, toolName, reason: req.reason, bossOpenId: deps.bossOpenId }))
+          .then((res) => {
+            sentCardMessageId = deps.messageIdOf(res);
+          })
+          .catch((err) => {
+            // 发卡失败 → fail-closed（settle 幂等：超时/abort 先触发则不覆盖）
+            deps.logger?.warn?.(`审批卡发送失败 chat=${chatId}: ${err instanceof Error ? err.message : String(err)}`);
+            settle("unavailable");
+          });
       } catch (err) {
-        // 发卡失败 → fail-closed
-        deps.logger?.warn?.(`审批卡发送失败 chat=${chatId}: ${err instanceof Error ? err.message : String(err)}`);
+        // 防御：同步 throw（如 mock 同步抛）→ fail-closed
+        deps.logger?.warn?.(`审批卡发送同步异常 chat=${chatId}: ${err instanceof Error ? err.message : String(err)}`);
         settle("unavailable");
       }
     });
