@@ -59,7 +59,7 @@ describe("createEventHandler（M4 提取重构）", () => {
     const { deps } = makeDeps();
     const onEvent = createEventHandler(deps as any);
     onEvent("card.action.trigger", { context: { open_chat_id: "oc_1" }, action: { value: { action: "other" } } });
-    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("不匹配 answer: 前缀"));
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("不匹配 answer:/free_text: 前缀"));
   });
 
   it("card.action：feedback: 前缀已随 form 灾难回退移除 → warn 拦截不转发", () => {
@@ -71,7 +71,20 @@ describe("createEventHandler（M4 提取重构）", () => {
       action: { value: { action: "feedback:q1" }, form_values: { free_text: "我的补充" } },
     });
     expect(onCardAction).not.toHaveBeenCalled();
-    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("不匹配 answer: 前缀"));
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("不匹配 answer:/free_text: 前缀"));
+  });
+
+  it("card.action：free_text: 前缀 → 放行进提问桥（Bug2 激活自由输入死代码）", () => {
+    const onCardAction = vi.fn().mockReturnValue(true);
+    const { deps } = makeDeps({ userQuestionBridge: { onCardAction } });
+    const onEvent = createEventHandler(deps as any);
+    onEvent("card.action.trigger", {
+      context: { open_chat_id: "oc_1" },
+      action: { value: { action: "free_text:q1", questionId: "q1", mode: "freeText" } },
+    });
+    // Bug2：守卫放行 free_text:，交提问桥 onCardAction（其内部有 freeText 分支）
+    expect(onCardAction).toHaveBeenCalledWith("oc_1", "free_text:q1");
+    expect(deps.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("不匹配 answer:/free_text: 前缀"));
   });
 
   it("card.action：提问桥已消费（onCardAction true）→ 不 steer", async () => {
@@ -175,7 +188,7 @@ describe("createEventHandler（M4 提取重构）", () => {
       });
       await vi.waitFor(() => expect(onCardAction).toHaveBeenCalledWith("oc_1", "mode:read-only"));
       expect(deps.mapper.getOrCreateAgent).not.toHaveBeenCalled();
-      expect(deps.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("不匹配 answer: 前缀"));
+      expect(deps.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("不匹配 answer:/free_text: 前缀"));
     });
 
     it("value 为字符串 → 直接作为 op 传参", async () => {

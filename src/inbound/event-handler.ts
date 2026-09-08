@@ -116,9 +116,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
             d.action?.name ??
             (d as any).event?.action?.value?.action ??
             (d as any).event?.action?.name;
-          // answer: 前缀 = 提问卡片选项按钮（M4-R4 灾难回退：feedback:/form_values 已随 form 移除）
-          if (!actionName || !actionName.startsWith("answer:")) {
-            logger?.warn?.(`card.action.trigger: actionName 不匹配 answer: 前缀，actionName=${actionName ?? "undefined"}`);
+          // answer:/free_text: 前缀 = 提问卡片按钮（answer: 选项点击；free_text: 切「自由输入」模式，M4 终审风险1）。
+          // ★ Bug2 修复：此前守卫只放行 answer:，free_text: 在分发处被丢弃 → 「我想自由输入」死代码；
+          //   现一并放行进 userQuestionBridge.onCardAction（其内部已分别处理 answer:/free_text: 两分支）。
+          if (!actionName || (!actionName.startsWith("answer:") && !actionName.startsWith("free_text:"))) {
+            logger?.warn?.(`card.action.trigger: actionName 不匹配 answer:/free_text: 前缀，actionName=${actionName ?? "undefined"}`);
             break;
           }
           logger?.info?.(`card.action.trigger: chatId=${chatId} actionName=${actionName}`);

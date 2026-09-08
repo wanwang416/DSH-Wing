@@ -299,13 +299,11 @@ export function apply(ctx: any, rawConfig: unknown): void {
   // ---------- P1-1 审批卡（danger-full-access 危险操作审批；ALAN 拍板④：仅老板本人可点） ----------
   // approval/request waterfall：记忆命中 → 直接 allowed-once；否则弹四按钮审批卡
   const approvalBridge = createApprovalBridge({
-    sendCard: (chatId, card) =>
-      outbox.enqueue({
-        dedupeKey: `${sessionKey(chatId)}:approval:${Date.now()}`,
-        chatId,
-        kind: "card",
-        payload: { kind: "card", card },
-      }),
+    // ★ Bug3b：审批卡改直发 sender.sendCard（返回 SDK 响应 → 取 message_id → 决策后 updateCard 收口换状态卡）。
+    //   原走 outbox（磁盘持久化重试）拿不到 message_id 无法收口；代价 = 断联重启不补发（对齐提问卡，Alan 拍板 2026-09-05）
+    sendCard: (chatId, card) => sender.sendCard(chatId, card),
+    updateCard: (messageId, cardJson) => sender.updateCard(messageId, cardJson),
+    messageIdOf: messageIdOfRes,
     sendText: (chatId, text) =>
       outbox.enqueue({
         dedupeKey: `${sessionKey(chatId)}:approval:text:${Date.now()}`,
