@@ -24,12 +24,21 @@ describe("toSessionEventOut（M3 任务 3 事件映射）", () => {
     expect(toSessionEventOut({ type: "user/message", data: { source: { kind: "user" }, content: [{ type: "text", text: "hi" }] } })).toBeUndefined();
     expect(toSessionEventOut({ type: "user/message", data: { source: { kind: "context" }, content: [{ type: "text", text: "注入" }] } })).toEqual({ type: "user/message", kind: "context", text: "注入" });
   });
+
+  it("step/start、step/end → 带 turn/step 透出（原被丢弃，现透出供过程卡拆卡）", () => {
+    expect(toSessionEventOut({ type: "step/start", data: { turn: 1, step: 3 } })).toEqual({ type: "step/start", turn: 1, step: 3 });
+    expect(toSessionEventOut({ type: "step/end", data: { turn: 1, step: 3 } })).toEqual({ type: "step/end", turn: 1, step: 3 });
+    expect(toSessionEventOut({ type: "step/start", data: {} })).toEqual({ type: "step/start", turn: undefined, step: undefined });
+  });
 });
 
 describe("createForwarder（M3：callId 反查 + 事件分发）", () => {
   function makeForwarder() {
     const deps = {
       onTurnStart: vi.fn(),
+      // ★ 卡片改造：step 边界（供过程卡拆卡/计数）
+      onStepStart: vi.fn(),
+      onStepEnd: vi.fn(),
       onChunk: vi.fn(),
       onThinking: vi.fn(),
       onAssistantMessage: vi.fn(),
@@ -71,5 +80,16 @@ describe("createForwarder（M3：callId 反查 + 事件分发）", () => {
     const { f, deps } = makeForwarder();
     f.onSessionEvent("oc_1", { type: "user/message", kind: "context", text: "注入" });
     expect(deps.onContext).toHaveBeenCalledWith("oc_1", "注入");
+  });
+
+  it("step/start|end → onStepStart/onStepEnd(step) 分发（不触发其它）", () => {
+    const { f, deps } = makeForwarder();
+    f.onSessionEvent("oc_1", { type: "step/start", turn: 1, step: 2 });
+    expect(deps.onStepStart).toHaveBeenCalledWith("oc_1", 2);
+    f.onSessionEvent("oc_1", { type: "step/end", turn: 1, step: 2 });
+    expect(deps.onStepEnd).toHaveBeenCalledWith("oc_1", 2);
+    expect(deps.onChunk).not.toHaveBeenCalled();
+    expect(deps.onAssistantMessage).not.toHaveBeenCalled();
+    expect(deps.onTurnEnd).not.toHaveBeenCalled();
   });
 });

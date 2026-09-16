@@ -36,6 +36,8 @@ export interface ExperienceDeps {
 interface StreamState {
   card?: StreamingCard;
   hasOutput: boolean;
+  /** ★ 卡片改造：最终正文候选（最后一次 assistant/message；onTurnEnd 据此发结果卡） */
+  latestAnswer?: string;
 }
 
 export function createExperience(deps: ExperienceDeps) {
@@ -127,28 +129,19 @@ export function createExperience(deps: ExperienceDeps) {
       void s.card?.addThinking(text).catch(() => void 0);
     },
 
-    /** assistant/message：最终回答 → 卡片落地（一个框，含思考+工具+回答）
-     * 按单卡流式约定：全程一张卡片增量更新，最终回答在卡片内，不单独发重复文本
-     * （ALAN 反馈：我上次改错了，发了两次同样内容，现在改回 成熟桥接实现 正确逻辑）
+    /**
+     * ★ 卡片改造：assistant/message **每 step 都有一条**（真机 154 步中 136 步各带 1 条），
+     *   所以不能拿它当「整段收尾」（旧逻辑每 step 一次 finalize → 反复覆盖/重复，根因）。
+     *   这里仅把该段文本记为「最终正文候选」（最后一条 = 最终 step 答案），
+     *   真正的「结果卡」由 onTurnEnd 判定结束时统一发（finalizeToNewCard）。结果：不刷屏、不覆盖。
+     *   （supervisor disarm 保留：首个 assistant 到达即解除，与改造前一致，不扩大范围）
      */
     async onAssistantMessage(chatId: string, text: string): Promise<void> {
       const s = st(chatId);
       s.hasOutput = true;
+      s.latestAnswer = text;
       deps.turnSupervisor.disarm(chatId);
-      if (s.card) {
-        await s.card.finalize(text);
-      } else if (text && text.trim() !== "" && text.trim() !== "No response.") {
-        // 卡片不可用且未创建：降级普通消息（完整单条）
-        try {
-          await deps.sendText(chatId, text);
-        } catch (err) {
-          deps.logger?.warn?.(`最终回复发送失败: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-      const mid = reactionTarget.get(chatId);
-      if (mid && deps.cfg().reactions.enabled) {
-        deps.addReaction(mid, deps.cfg().reactions.done).catch(() => void 0);
-      }
+      // 不再在此发结果卡 / 降级 text —— 统一到 onTurnEnd（避免每 step 重复推送）
     },
 
     /** tool/call：Tools 面板新增一行（🔧 <工具名>，带参数摘要） */
@@ -169,10 +162,41 @@ export function createExperience(deps: ExperienceDeps) {
       await s.card?.addContext(text).catch(() => void 0);
     },
 
-    /** turn/end：无输出警告 + 失败表情 */
+    /** ★ 卡片改造：step/start（过程卡计数/拆多张阈值预留；首期静默，不刷屏） */
+    onStepStart(chatId: string, _step: number): void {
+      void chatId;
+      void _step;
+      // 首期静默：过程内容已由 onChunk/onThinking/onToolCall 累积；拆卡阈值在此预留
+    },
+
+    /** ★ 卡片改造：step/end（默认静默；如拆过程卡②在此检测 step 数超限） */
+    onStepEnd(chatId: string, _step: number): void {
+      void chatId;
+      void _step;
+      // 首期静默：保持「折叠静默、不刷屏」；多 step 不再因收尾反复覆盖（根因已治）
+    },
+
+    /** turn/end：判定真正结束 → 发独立「结果卡」；失败/无产出 → 警告+表情 */
     async onTurnEnd(chatId: string, reason: string): Promise<void> {
       const s = st(chatId);
-      if (!s.hasOutput && reason !== "completed") {
+      const finalAnswer = s.latestAnswer?.trim();
+      if (reason === "completed" && finalAnswer && finalAnswer !== "No response.") {
+        // ★ 正常完成 → 发独立结果卡（干净、在最新处、不用上翻——治 Bug1）；过程卡保持可展开回看
+        try {
+          if (s.card) {
+            await s.card.finalizeToNewCard(s.latestAnswer!);
+          } else {
+            // 过程卡从未建成（极端降级）→ 结果用普通文本兜底
+            await deps.sendText(chatId, s.latestAnswer!);
+          }
+          const mid = reactionTarget.get(chatId);
+          if (mid && deps.cfg().reactions.enabled) {
+            deps.addReaction(mid, deps.cfg().reactions.done).catch(() => void 0);
+          }
+        } catch (err) {
+          deps.logger?.warn?.(`结果卡发送异常: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else if (!s.hasOutput && reason !== "completed") {
         try {
           await deps.sendText(chatId, "⚠️ 本轮没有产出回复");
         } catch {

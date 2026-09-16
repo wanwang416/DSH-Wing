@@ -374,3 +374,74 @@ describe("StreamingCard（超长压缩降级）", () => {
     expect(JSON.parse(lastJson).header).toBeDefined();
   });
 });
+
+describe("StreamingCard.finalizeToNewCard（★ 卡片改造：独立结果卡）", () => {
+  function setup(overrides: any = {}) {
+    const sender = makeSender();
+    const onFallback = vi.fn(() => Promise.resolve());
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const card = new StreamingCard("oc_1", { sender, onFallback, logger, ...overrides });
+    return { sender, onFallback, logger, card };
+  }
+
+  it("无正文/空白/No response → false 且不发送", async () => {
+    const { sender, card } = setup();
+    expect(await card.finalizeToNewCard("")).toBe(false);
+    expect(await card.finalizeToNewCard("   ")).toBe(false);
+    expect(await card.finalizeToNewCard("No response.")).toBe(false);
+    expect(sender.sendCard).not.toHaveBeenCalled();
+    expect(sender.updateCard).not.toHaveBeenCalled();
+  });
+
+  it("inline：sender.sendCard 新建一张独立干净结果卡（绝不 update 主卡）", async () => {
+    const { sender, card } = setup();
+    sender.sendCard.mockResolvedValue({ data: { message_id: "m_result" } });
+    const ok = await card.finalizeToNewCard("这是最终答案");
+    expect(ok).toBe(true);
+    // 独立新建：只 sendCard、不 update 已有主卡
+    expect(sender.sendCard).toHaveBeenCalledTimes(1);
+    expect(sender.updateCard).not.toHaveBeenCalled();
+    const [chatId, sent] = sender.sendCard.mock.calls[0];
+    expect(chatId).toBe("oc_1");
+    // 结果卡是纯 markdown 干净卡：无步骤面板、无「Working…」占位，答案就在卡内
+    const raw = JSON.stringify(sent);
+    expect(raw).not.toContain("collapsible_panel");
+    expect(raw).not.toContain("Working…");
+    expect(raw).toContain("这是最终答案");
+  });
+
+  it("cardkit 存在 → 走 create + stream 打字机，返回 true", async () => {
+    const cardkit = makeCardkit();
+    const { sender, card } = setup({ cardkit });
+    expect(await card.finalizeToNewCard("答案")).toBe(true);
+    expect(cardkit.create).toHaveBeenCalledWith("oc_1", expect.stringContaining("答案"));
+    expect(cardkit.stream).toHaveBeenCalledTimes(1);
+    expect(sender.sendCard).not.toHaveBeenCalled();
+  });
+
+  it("cardkit 失败 → 降级 inline sendCard 仍成功", async () => {
+    const cardkit = { create: vi.fn(() => Promise.reject(new Error("cardkit down"))), stream: vi.fn() };
+    const { sender, card } = setup({ cardkit });
+    sender.sendCard.mockResolvedValue({ data: { message_id: "m_inline" } });
+    expect(await card.finalizeToNewCard("答案")).toBe(true);
+    expect(sender.sendCard).toHaveBeenCalledTimes(1);
+  });
+
+  it("sendCard 未返回 message_id → 降级 onFallback 普通文本 + false", async () => {
+    const sender = makeSender();
+    sender.sendCard.mockResolvedValue({ ok: true });
+    const onFallback = vi.fn(() => Promise.resolve());
+    const card = new StreamingCard("oc_1", { sender, onFallback });
+    expect(await card.finalizeToNewCard("答案")).toBe(false);
+    expect(onFallback).toHaveBeenCalledWith("oc_1", "答案");
+  });
+
+  it("主过程卡已废（failed）→ 结果直接 onFallback 普通文本，不再试卡片", async () => {
+    const { sender, onFallback, card } = setup();
+    sender.sendCard.mockResolvedValue({ ok: true }); // doCreate 拿不到 message_id → 置 failed
+    await card.finalize("不会走 update");
+    expect(await card.finalizeToNewCard("答案")).toBe(false);
+    expect(onFallback).toHaveBeenCalledWith("oc_1", "答案");
+    expect(sender.updateCard).not.toHaveBeenCalled();
+  });
+});

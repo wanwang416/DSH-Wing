@@ -432,6 +432,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
   // ---------- 事件转发（7 种事件 → 体验） ----------
   const forwarder = createForwarder({
     onTurnStart: (chatId) => experience.onTurnStart(chatId),
+    onStepStart: (chatId, step) => experience.onStepStart(chatId, step),
+    onStepEnd: (chatId, step) => experience.onStepEnd(chatId, step),
     onChunk: (chatId, text) => experience.onChunk(chatId, text),
     onThinking: (chatId, text) => experience.onThinking(chatId, text),
     onAssistantMessage: (chatId, text) => void experience.onAssistantMessage(chatId, text),
