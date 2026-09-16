@@ -14,6 +14,8 @@ function makeCard() {
     setToolResult: vi.fn(() => Promise.resolve()),
     addContext: vi.fn(() => Promise.resolve()),
     finalize: vi.fn(() => Promise.resolve()),
+    // ★ 卡片改造：独立结果卡（onTurnEnd 调用）
+    finalizeToNewCard: vi.fn(() => Promise.resolve(true)),
   };
 }
 
@@ -115,39 +117,54 @@ describe("experience.onTurnStart / onChunk / onThinking", () => {
 });
 
 describe("experience.onAssistantMessage", () => {
-  it("卡片存在 → finalize + disarm + done 表情", async () => {
+  it("卡片存在 → 仅记录最终正文候选 + disarm，不 finalize（结果卡留 onTurnEnd）", async () => {
     const { deps, ex, card } = setup();
     ex.onTurnStart("oc_1");
-    ex.onInbound("oc_1", "om_9");
     await ex.onAssistantMessage("oc_1", "最终答案");
-    expect(card.finalize).toHaveBeenCalledWith("最终答案");
+    // ★ 卡片改造：assistant/message 每 step 都有，不能再当收尾原地 finalize
+    expect(card.finalize).not.toHaveBeenCalled();
+    expect(card.finalizeToNewCard).not.toHaveBeenCalled();
     expect(deps.turnSupervisor.disarm).toHaveBeenCalledWith("oc_1");
-    expect(deps.addReaction).toHaveBeenCalledWith("om_9", "✅");
+    expect(deps.sendText).not.toHaveBeenCalled();
+    // 多 step：再来第二条 → 仍只记录候选，不重复发卡/覆盖
+    await ex.onAssistantMessage("oc_1", "第二步答案");
+    expect(card.finalize).not.toHaveBeenCalled();
+    expect(card.finalizeToNewCard).not.toHaveBeenCalled();
+  });
+  it("结果卡在 turn/end completed 时由 finalizeToNewCard 独立发出（治多次覆盖）", async () => {
+    const { deps, ex, card } = setup();
+    ex.onTurnStart("oc_1");
+    await ex.onAssistantMessage("oc_1", "最终答案");
+    await ex.onTurnEnd("oc_1", "completed");
+    expect(card.finalizeToNewCard).toHaveBeenCalledWith("最终答案");
+    expect(card.finalize).not.toHaveBeenCalled();
     expect(deps.sendText).not.toHaveBeenCalled();
   });
-  it("卡片不可用 + 有效文本 → sendText 降级单条", async () => {
+  it("卡片不存在 + 有效最终正文 → onTurnEnd 用 sendText 兜底单条", async () => {
     const { deps, ex } = setup();
+    // 不 onTurnStart → 无 card；onAssistantMessage 仍记录候选
     await ex.onAssistantMessage("oc_1", "兜底完整回答");
+    await ex.onTurnEnd("oc_1", "completed");
     expect(deps.sendText).toHaveBeenCalledWith("oc_1", "兜底完整回答");
     expect(deps.turnSupervisor.disarm).toHaveBeenCalledWith("oc_1");
   });
-  it("卡片不可用 + 空/空白/No response → 不 sendText", async () => {
-    const { deps, ex } = setup();
+  it("空/空白/No response → onTurnEnd 不发结果卡、不 sendText", async () => {
+    const { deps, ex, card } = setup();
+    ex.onTurnStart("oc_1");
     await ex.onAssistantMessage("oc_1", "");
     await ex.onAssistantMessage("oc_1", "   ");
     await ex.onAssistantMessage("oc_1", "No response.");
+    await ex.onTurnEnd("oc_1", "completed");
+    expect(card.finalizeToNewCard).not.toHaveBeenCalled();
     expect(deps.sendText).not.toHaveBeenCalled();
   });
-  it("sendText 抛错 → logger.warn", async () => {
-    const { deps, ex } = setup();
-    deps.sendText.mockRejectedValueOnce(new Error("chat send fail"));
-    await ex.onAssistantMessage("oc_1", "会失败");
-    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("最终回复发送失败"));
-  });
-  it("reactions 关闭 → 不发 done 表情", async () => {
-    const { deps, ex } = setup({ reactions: { enabled: false, pool: ["👍"], done: "✅", failed: "❌" } });
+  it("reactions 关闭 → 不发 done 表情（done 移到 turn/end）", async () => {
+    const { deps, ex, card } = setup({ reactions: { enabled: false, pool: ["👍"], done: "✅", failed: "❌" } });
+    ex.onTurnStart("oc_1");
     ex.onInbound("oc_1", "om_9");
-    await ex.onAssistantMessage("oc_1", "ok");
+    await ex.onAssistantMessage("oc_1", "最终答案");
+    await ex.onTurnEnd("oc_1", "completed");
+    expect(card.finalizeToNewCard).toHaveBeenCalled();
     expect(deps.addReaction).not.toHaveBeenCalled();
   });
 });

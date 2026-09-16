@@ -15,6 +15,9 @@ export type SessionEventOut =
   /** reasoning-delta → 思考面板累积 */
   | { type: "assistant/thinking"; text: string }
   | { type: "assistant/message"; text: string }
+  /** ★卡片改造：step 边界（含 turn/step 序号），供过程卡拆卡/静默计数 */
+  | { type: "step/start"; turn: number; step: number }
+  | { type: "step/end"; turn: number; step: number }
   | { type: "turn/end"; reason: string }
   | { type: "tool/call"; name: string; input?: string; callId: string }
   | { type: "tool/result"; name?: string; callId?: string; error?: unknown }
@@ -33,6 +36,10 @@ export function toSessionEventOut(ev: any): SessionEventOut | undefined {
   switch (ev?.type) {
     case "turn/start":
       return { type: "turn/start" };
+    case "step/start":
+      return { type: "step/start", turn: ev.data?.turn, step: ev.data?.step };
+    case "step/end":
+      return { type: "step/end", turn: ev.data?.turn, step: ev.data?.step };
     case "assistant/chunk": {
       const c = ev.data?.chunk;
       if (c?.type === "text-delta") return { type: "assistant/chunk", text: c.text };
@@ -79,6 +86,9 @@ export function toSessionEventOut(ev: any): SessionEventOut | undefined {
 
 export interface ForwarderDeps {
   onTurnStart(chatId: string): void;
+  /** ★卡片改造：step 边界（step 序号供过程卡拆卡/折叠计数） */
+  onStepStart(chatId: string, step: number): void;
+  onStepEnd(chatId: string, step: number): void;
   onChunk(chatId: string, text: string): void;
   onThinking(chatId: string, text: string): void;
   onAssistantMessage(chatId: string, text: string): void;
@@ -98,6 +108,12 @@ export function createForwarder(deps: ForwarderDeps) {
         case "turn/start":
           callNames.clear();
           deps.onTurnStart(chatId);
+          break;
+        case "step/start":
+          deps.onStepStart(chatId, event.step);
+          break;
+        case "step/end":
+          deps.onStepEnd(chatId, event.step);
           break;
         case "assistant/chunk":
           deps.onChunk(chatId, event.text);

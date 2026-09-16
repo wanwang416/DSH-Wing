@@ -482,6 +482,47 @@ export class StreamingCard {
     }
   }
 
+  /**
+   * ★ 卡片改造：本轮真正收尾时**另起一张干净「结果卡」**（与过程卡解耦）。
+   * 区别于 finalize()（原地更新同一张过程卡）：这里走 sender **新建一张独立卡**，
+   * 只含最终答案、无步骤面板/思考占位，落卡即完成态——答案在最新处、不用上翻（治 Bug1）。
+   * 降级链：CardKit 流式 → inline sendCard 单 markdown → onFallback 普通文本。
+   * @returns true=结果卡已发出；false=无正文或已降级 text
+   */
+  async finalizeToNewCard(answer: string): Promise<boolean> {
+    const text = (answer ?? "").trim();
+    if (!text || text === "No response.") return false;
+    // 主过程卡已废 → 结果直接降级普通文本（不再尝试卡片）
+    if (this.failed) {
+      await this.deps.onFallback?.(this.chatId, text);
+      return false;
+    }
+    const json = buildCardJson(text, true); // 纯 markdown 干净结果卡（element_id=main_text，streaming 打字机）
+    // 1) CardKit 创建 + 一次流式送全文（对齐主卡 create/stream 语义）
+    if (this.deps.cardkit) {
+      try {
+        const res = await this.deps.cardkit.create(this.chatId, json);
+        await this.deps.cardkit.stream(res.cardId, text, 1);
+        return true;
+      } catch (err) {
+        this.deps.logger?.warn?.(`结果卡 CardKit 失败，降级 inline: ${err instanceof Error ? err.message : String(err)}`);
+        // fall through → inline
+      }
+    }
+    // 2) inline：sendCard 新建单 markdown 卡（全新 message_id，独立于过程卡）
+    try {
+      const res = (await this.deps.sender.sendCard(this.chatId, JSON.parse(json))) as any;
+      const mid = res?.data?.message_id ?? res?.message_id ?? res?.data?.item?.message_id;
+      if (!mid) throw new Error("sendCard 未返回 message_id");
+      return true;
+    } catch (err) {
+      this.deps.logger?.warn?.(`结果卡 inline 失败，降级普通文本: ${err instanceof Error ? err.message : String(err)}`);
+      this.failed = true;
+      await this.deps.onFallback?.(this.chatId, text);
+      return false;
+    }
+  }
+
   get cardId(): string {
     return this._cardId ?? "";
   }
