@@ -28,9 +28,14 @@ export interface ReactionsConfig {
 
 /** 企微智能机器人线路配置（长连接模式，扫码绑定后写 WING_WECOM_BOT 凭据） */
 export interface WecomConfig {
-  enabled: boolean;
+  /** 显式开启才 true；缺省 undefined = 有凭据即启用（S1 三态：false 显式关 / true 开 / undefined 有凭据开） */
+  enabled?: boolean;
   botId?: string;
   secret?: string;
+  /** 群聊 @ 机器人显示名（D2/A 精确触发；未配置时维持宽松并提示） */
+  botName?: string;
+  /** 扫码请求 source 标识（D7a 配置化；默认 dsh-wing） */
+  source?: string;
   welcomeText: string;
 }
 
@@ -87,9 +92,11 @@ export const DEFAULT_CONFIG: WingConfig = {
   // 环境变量显式置 "0" 才关闭；config.json 可覆盖（getConfig 的 ...raw 天然优先）
   interruptClassifierEnabled: process.env.DSH_WING_INTERRUPT_CLASSIFIER !== "0",
   wecom: {
-    enabled: false,
+    // S1：不给 enabled 默认值（undefined = 有凭据即启用），显式 false 才关闭
     botId: process.env.WECOM_BOT_ID || undefined,
     secret: process.env.WECOM_BOT_SECRET || undefined,
+    botName: process.env.WECOM_BOT_NAME || undefined,
+    source: process.env.WECOM_SOURCE || undefined,
     welcomeText: "你好，我是 DSH 智能助手。直接发消息即可开始对话。",
   },
 };

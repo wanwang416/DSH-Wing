@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWecomInbound, isWecomChatId, extractWecomMentions } from "../../src/inbound/wecom-parser.js";
+import { parseWecomInbound, isWecomChatId, extractWecomMentions, consumeWecomGroupDiag } from "../../src/inbound/wecom-parser.js";
 
 describe("parseWecomInbound：单聊（主场景）", () => {
   it("text 单聊 → chatId=from.userid / p2p / platform=wecom / 文本直通", () => {
@@ -156,3 +156,58 @@ describe("isWecomChatId", () => {
     expect(isWecomChatId("wb_abc123")).toBe(true);
   });
 });
+
+describe("extractWecomMentions：D2/A botName 精确匹配", () => {
+  it("botName 有值 → 仅精确命中 @机器人名，@同事不产生提及", () => {
+    expect(extractWecomMentions("@DSH机器人 帮我 @小王 看看", "DSH机器人")).toEqual(["@DSH机器人"]);
+  });
+  it("全角 ＠ 命中", () => {
+    expect(extractWecomMentions("＠DSH机器人 在吗", "DSH机器人")).toEqual(["@DSH机器人"]);
+  });
+  it("大小写不敏感 + 去空白（显示名含空格）", () => {
+    expect(extractWecomMentions("@dsh 助手 在吗", "DSH助手")).toEqual(["@dsh 助手"]);
+  });
+  it("未配置 botName → 宽松提取全部 @（S5 提示补配）", () => {
+    expect(extractWecomMentions("@小王 帮我", undefined)).toEqual(["@小王"]);
+  });
+});
+
+describe("consumeWecomGroupDiag（S5）", () => {
+  it("进程内首次 true，之后恒 false（诊断仅一次）", () => {
+    expect(consumeWecomGroupDiag()).toBe(true);
+    expect(consumeWecomGroupDiag()).toBe(false);
+    expect(consumeWecomGroupDiag()).toBe(false);
+  });
+});
+
+describe("parseWecomInbound：群聊 botName 精确（D2）", () => {
+  it("群聊 @机器人名 + opts.botName → mentions 仅机器人", () => {
+    const msg = parseWecomInbound(
+      {
+        msgid: "m9",
+        chattype: "group",
+        chatid: "grp_2",
+        from: { userid: "u3" },
+        msgtype: "text",
+        text: { content: "@DSH机器人 天气" },
+      },
+      { botName: "DSH机器人" },
+    );
+    expect(msg!.mentions).toEqual(["@DSH机器人"]);
+  });
+  it("群聊 @同事（未 @机器人）→ mentions 为空", () => {
+    const msg = parseWecomInbound(
+      {
+        msgid: "m10",
+        chattype: "group",
+        chatid: "grp_2",
+        from: { userid: "u3" },
+        msgtype: "text",
+        text: { content: "@小王 中午吃啥" },
+      },
+      { botName: "DSH机器人" },
+    );
+    expect(msg!.mentions).toEqual([]);
+  });
+});
+

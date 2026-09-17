@@ -33,3 +33,21 @@ describe("getConfig", () => {
     expect(cfg).toEqual(DEFAULT_CONFIG);
   });
 });
+
+describe("getConfig：企微（S1 三态 / D7a source）", () => {
+  it("wecom.enabled 缺省 undefined（不显式关闭；有凭据即自动启用）", () => {
+    const cfg = getConfig({}, {});
+    expect(cfg.wecom.enabled).toBeUndefined();
+    const on = getConfig({}, { wecom: { enabled: true } });
+    expect(on.wecom.enabled).toBe(true);
+    const off = getConfig({}, { wecom: { enabled: false } });
+    expect(off.wecom.enabled).toBe(false);
+  });
+  it("wecom.source 默认无；raw 覆盖（D7a）", () => {
+    const cfg = getConfig({}, {});
+    expect(cfg.wecom.source).toBeUndefined();
+    const cfg2 = getConfig({}, { wecom: { source: "my-wing" } });
+    expect(cfg2.wecom.source).toBe("my-wing");
+  });
+});
+

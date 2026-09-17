@@ -11,6 +11,17 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { createSetupFlow, type SetupFlowDeps } from "../../src/setup/setup-flow.js";
+import { startWecomQrLogin, pollWecomQrLogin } from "../../src/setup/wecom-qr-auth.js";
+
+vi.mock("../../src/setup/wecom-qr-auth.js", () => ({
+  startWecomQrLogin: vi.fn(async () => ({
+    verificationUrl: "https://qr-wecom",
+    expiresAt: Date.now() + 300_000,
+    sessionKey: "s1",
+  })),
+  pollWecomQrLogin: vi.fn(async () => ({ connected: true, botId: "wb_1", secret: "sec_1" })),
+  WECOM_POLL_INTERVAL_MS: 100, // 测试加速（真机 3s）
+}));
 
 /** mock 全局 fetch：begin 返回二维码，poll 立即返回明文凭据 */
 function stubFetchHappy(): void {
@@ -153,3 +164,84 @@ describe("createSetupFlow", () => {
     }
   });
 });
+
+describe("createSetupFlow：企微扫码（M2/N5）", () => {
+  const makeWecomDeps = () =>
+    makeDeps({
+      wecom: { persist: vi.fn(async () => {}), notify: vi.fn(), failNotify: vi.fn(), onStatus: vi.fn() },
+    });
+
+  it("Web 触发（chatId=undefined）→ 静默完成：persist/restart 执行，notify/failNotify 不调（N5）", async () => {
+    const deps = makeWecomDeps();
+    const flow = createSetupFlow(deps);
+    const res = await flow.startWecom(undefined);
+    expect(res?.url).toBe("https://qr-wecom");
+    await settle(3300); // 等第一次 3s 轮询命中 connected
+    expect(deps.wecom!.persist).toHaveBeenCalledWith({ botId: "wb_1", secret: "sec_1" });
+    expect(deps.wecom!.notify).not.toHaveBeenCalled();
+    expect(deps.wecom!.failNotify).not.toHaveBeenCalled();
+    expect(flow.isWecomBusy()).toBe(false);
+  }, 15000);
+
+  it("飞书消息触发（chatId=chat1）→ 完成后 notify(chat1)（N5：有 chatId 才通知）", async () => {
+    const deps = makeWecomDeps();
+    const flow = createSetupFlow(deps);
+    await flow.startWecom("chat1");
+    await settle(3300);
+    expect(deps.wecom!.persist).toHaveBeenCalled();
+    expect(deps.wecom!.notify).toHaveBeenCalledWith("chat1");
+    expect(deps.wecom!.failNotify).not.toHaveBeenCalled();
+  }, 15000);
+
+  it("轮询失败（有 chatId）→ failNotify(chatId)（N5）", async () => {
+    const deps = makeWecomDeps();
+    const flow = createSetupFlow(deps);
+    (pollWecomQrLogin as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      connected: false,
+      status: "expired",
+      message: "二维码已过期",
+    });
+    await flow.startWecom("chat1");
+    await settle(3300);
+    expect(deps.wecom!.failNotify).toHaveBeenCalledWith("chat1", expect.stringContaining("二维码已过期"));
+    expect(deps.wecom!.persist).not.toHaveBeenCalled();
+    expect(flow.isWecomBusy()).toBe(false);
+  }, 15000);
+
+  it("轮询失败（chatId=undefined）→ failNotify 不调（N5 无幽灵通知）", async () => {
+    const deps = makeWecomDeps();
+    const flow = createSetupFlow(deps);
+    (pollWecomQrLogin as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      connected: false,
+      status: "expired",
+      message: "二维码已过期",
+    });
+    await flow.startWecom(undefined);
+    await settle(3300);
+    expect(deps.wecom!.failNotify).not.toHaveBeenCalled();
+    expect(flow.isWecomBusy()).toBe(false);
+  }, 15000);
+});
+
+describe("createSetupFlow：企微 getWecomQr（M2）", () => {
+  it("QR 生成后返回 PNG；完成后清空", async () => {
+    const deps = makeDeps({
+      wecom: { persist: vi.fn(async () => {}), notify: vi.fn(), failNotify: vi.fn(), onStatus: vi.fn() },
+    });
+    const flow = createSetupFlow(deps);
+    // poll 先保持 waiting（流程不完成），验证 PNG 写入；再切 connected 验证清空
+    const poll = pollWecomQrLogin as unknown as ReturnType<typeof vi.fn>;
+    poll.mockImplementation(async () => ({ connected: false, status: "waiting" }));
+    await flow.startWecom(undefined);
+    await settle(300); // startWecom ~200ms 返回 + toPngBuffer 写入；poll waiting → 未清空
+    const qr = flow.getWecomQr();
+    expect(qr?.png).toBeInstanceOf(Buffer);
+    expect(qr && qr.png.length).toBeGreaterThan(100);
+    expect(qr && qr.png.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a"); // PNG magic
+    // 恢复 connected → 下一次 poll 完成 → 清空
+    poll.mockImplementation(async () => ({ connected: true, botId: "wb_1", secret: "sec_1" }));
+    await settle(400);
+    expect(flow.getWecomQr()).toBeUndefined();
+  }, 15000);
+});
+

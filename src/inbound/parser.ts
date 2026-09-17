@@ -38,17 +38,31 @@ function pickText(contentRaw: string): string {
 /** 剥离 @bot 提及（开头连续提及 + 尾部多余空格） */
 export function stripMentions(text: string, mentions: string[], botOpenId?: string): string {
   let cur = text.trim();
-  const mentionTargets = new Set<string>();
-  for (const m of mentions) mentionTargets.add(m);
-  if (botOpenId) mentionTargets.add(botOpenId);
   let changed = true;
   while (changed) {
     changed = false;
-    // 开头：<at id=xxx></at> 或 @名字
-    const next = cur.replace(/^(?:<at[^>]*>.*?<\/at>|@\S+)\s*/i, "").trim();
-    if (next !== cur) {
-      cur = next;
+    // 1) <at> 标签（飞书）
+    const nextTag = cur.replace(/^(?:<at[^>]*>.*?<\/at>)\s*/i, "").trim();
+    if (nextTag !== cur) {
+      cur = nextTag;
       changed = true;
+      continue;
+    }
+    // 2) 显式 mentions 前缀（S2：按 mentions 项精确长度剥离，兼容含空格 botName 如「DSH 助手」）
+    for (const m of mentions) {
+      if (m && cur.startsWith(m)) {
+        cur = cur.slice(m.length).trim();
+        changed = true;
+        break;
+      }
+    }
+    // 3) 兜底：任意 @ 前缀（兼容未登记提及；半角 @ 与全角 ＠）
+    if (!changed) {
+      const nextAt = cur.replace(/^(?:[@＠]\S+)\s*/i, "").trim();
+      if (nextAt !== cur) {
+        cur = nextAt;
+        changed = true;
+      }
     }
   }
   return cur;

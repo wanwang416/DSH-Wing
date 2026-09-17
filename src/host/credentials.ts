@@ -30,6 +30,20 @@ export function createCredentialStore(ctx: any) {
       }
       return raw as LarkCredential;
     },
+    /** 原始凭据读取：不经 LarkCredential 形状过滤（企微 WING_WECOM_BOT 专用，R1/M1） */
+    async resolveRaw<T = unknown>(ref: string): Promise<T | undefined> {
+      const resolved = await ctx.credentials?.resolve?.(ref);
+      const raw = resolved?.value ?? resolved;
+      if (!raw) return undefined;
+      if (typeof raw === "string") {
+        try {
+          return JSON.parse(raw) as T;
+        } catch {
+          return undefined;
+        }
+      }
+      return raw as T; // 兼容直接对象值（测试桩/非 DSH 存储）
+    },
     // ★ 企微适配：value 放宽为 unknown（WING_WECOM_BOT 存 {botId, secret}，非 LarkCredential）
     async set(ref: string, value: unknown): Promise<void> {
       await ctx.credentials?.set?.(ref, JSON.stringify(value));

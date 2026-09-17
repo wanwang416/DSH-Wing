@@ -28,12 +28,12 @@ import { createMissedCompensation } from "./inbound/compensation.js";
 import { createBatching } from "./inbound/batching.js";
 import { createGroupPolicy } from "./inbound/group-policy.js";
 import { parseInboundMessage, type ParsedMessage } from "./inbound/parser.js";
-import { parseWecomInbound, isWecomChatId } from "./inbound/wecom-parser.js";
+import { parseWecomInbound, isWecomChatId, consumeWecomGroupDiag } from "./inbound/wecom-parser.js";
 import { chatTypeOf } from "./inbound/chat-type.js";
 import { createDedupeStore } from "./inbound/dedup.js";
 import { createDispatcher } from "./inbound/dispatcher.js";
 import { createEventHandler } from "./inbound/event-handler.js";
-import { sessionKey, SESSION_PREFIX, WECOM_SESSION_PREFIX, createSessionMapper, resetRunNonce, resetGeneration } from "./session/mapper.js";
+import { sessionKey, SESSION_PREFIX, WECOM_SESSION_PREFIX, createSessionMapper, resetRunNonce, resetGeneration, rememberPlatform, chatPlatform } from "./session/mapper.js";
 import { createRouteStore } from "./session/persistence.js";
 import { createSerialQueue } from "./session/serial.js";
 import { createAgent, resumeAgent, type WingAgentHandle } from "./agent/caller.js";
@@ -163,7 +163,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     dir: join(dir, "outbox"),
     deliver: async (env) => {
       try {
-        if (isWecomChatId(env.chatId)) {
+        if (env.platform === "wecom" || chatPlatform(env.chatId) === "wecom" || isWecomChatId(env.chatId)) { // D6/S6：显式标记优先，启发式仅兜底
           // ★ 企微线路：无模板卡片/表情 API → card 降级纯文本，reaction 忽略
           if (env.kind === "text") {
             await wecomSender.sendText(env.chatId, env.payload.text ?? "");
@@ -238,7 +238,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     // ★ StreamingCard 工厂：单卡流式（思考/工具/回答聚合一张卡），降级回退 outbox text
     createStreamCard: (chatId) => {
       // ★ 企微线路：流式走 replyStream（无卡片/打字机），接口与 StreamingCard 对齐
-      if (isWecomChatId(chatId)) {
+      if (chatPlatform(chatId) === "wecom" || isWecomChatId(chatId)) { // D6：登记优先，启发式兜底
         return new WecomStreamCard(chatId, {
           sender: wecomSender,
           logger,
@@ -246,6 +246,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
             outbox.enqueue({
               dedupeKey: `${cid}:wecom-fallback:${text.length}:${Date.now()}`,
               chatId: cid,
+              platform: "wecom", // S6：显式平台标记（会话过期后登记可能已清）
               kind: "text",
               payload: { kind: "text", text },
             }) as unknown as Promise<void>,
@@ -548,6 +549,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     async handleInbound(msg: ParsedMessage) {
       // ★ 企微适配：会话 key 按平台隔离（feishu:/wecom:），避免 chatId 撞车
       const platformPrefix = msg.platform === "wecom" ? WECOM_SESSION_PREFIX : SESSION_PREFIX;
+      if (msg.platform === "wecom") rememberPlatform(msg.chatId, "wecom"); // D6：入站即登记，供 outbox/StreamCard 分发
       // ★ P1-3 意图桥：群聊纯寒暄不触发 agent（未明确 @bot → 打 reaction + 消费 WAL，不建 session）
       // p2p 永远不过滤（用户单独找 bot 必须有响应）；@bot 命中 = 用户明确点名，也不过滤
       if (msg.chatType === "group") {
@@ -797,9 +799,11 @@ export function apply(ctx: any, rawConfig: unknown): void {
     wecom: {
       persist: async (c) => { await credStore.set("WING_WECOM_BOT", c); },
       notify: (chatId) => {
+        if (!chatId) return; // N5：面板触发（chatId=undefined）不产生幽灵 outbox 记录
         outbox.enqueue({
           dedupeKey: `wecom-setup:done:${chatId}`,
           chatId,
+          platform: "wecom", // S6：显式平台标记（setup 通知非入站路径，无登记兜底）
           kind: "text",
           payload: {
             kind: "text",
@@ -808,9 +812,11 @@ export function apply(ctx: any, rawConfig: unknown): void {
         });
       },
       failNotify: (chatId, message) => {
+        if (!chatId) return; // N5：面板触发（chatId=undefined）不产生幽灵 outbox 记录
         outbox.enqueue({
           dedupeKey: `wecom-setup:fail:${chatId}:${Date.now()}`,
           chatId,
+          platform: "wecom", // S6：显式平台标记
           kind: "text",
           payload: { kind: "text", text: `❌ 企微扫码绑定失败：${message}` },
         });
@@ -984,16 +990,27 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
   /** 企微智能机器人线路启动（长连接；可选，未配置/缺凭据不阻塞飞书主线路） */
   const startWecomBridge = async (): Promise<void> => {
-    const wc = cfg.wecom;
-    if (!wc?.enabled) { logger.info?.("企微线路未启用（wecom.enabled=false）"); return; }
-    if (!wc.botId || !wc.secret) {
-      logger.warn?.("企微线路 enabled 但缺少 botId/secret：可用 /setup wecom 扫码绑定，或配置 WECOM_BOT_ID / WECOM_BOT_SECRET");
+    const wc = cfg.wecom; // S1：enabled?: boolean（缺省 undefined）
+    // R1/M1：凭据走 resolveRaw（不经飞书 appId/appSecret 形状过滤），每次调用动态读，不受 cfg 冻结影响
+    const wcCred = await credStore.resolveRaw<{ botId?: string; secret?: string }>("WING_WECOM_BOT");
+    const botId = wc.botId ?? wcCred?.botId;
+    const secret = wc.secret ?? wcCred?.secret;
+    if (wc.enabled === false) { logger.info?.("企微线路已显式关闭（wecom.enabled=false），跳过启动"); return; }
+    const active = wc.enabled === true || Boolean(wcCred); // 三态：true 开 / undefined 有凭据开 / false 关
+    if (!active) { logger.info?.("企微线路未启用（wecom.enabled 未开启且无 WING_WECOM_BOT 凭据）"); return; }
+    if (!botId || !secret) {
+      logger.warn?.("企微线路启用但缺少 botId/secret：可用 /setup wecom 扫码绑定，或配置 WECOM_BOT_ID / WECOM_BOT_SECRET");
       return;
     }
-    const client = createWecomClient({ botId: wc.botId, secret: wc.secret, logger });
+    const client = createWecomClient({ botId, secret, logger });
     client.onMessage((frame) => {
-      const msg = parseWecomInbound(frame.body as any);
+      // D2/A：botName 精确触发群聊 @ 机器人名；未配置时 parser 内维持宽松并提示
+      const msg = parseWecomInbound(frame.body as any, { botName: wc.botName });
       if (!msg) return;
+      // S5：首条群聊消息诊断日志（核对 botName 与企微后台显示名是否一致；进程内一次）
+      if (msg.chatType === "group" && consumeWecomGroupDiag()) {
+        logger.info?.(`企微首条群聊 diag: chat=${msg.chatId} mentions=${JSON.stringify(msg.mentions)} raw="${msg.rawText.slice(0, 80)}"`);
+      }
       void dispatcher.handleParsed(msg).catch((err) =>
         logger.error?.(`企微消息处理失败: ${err instanceof Error ? err.message : String(err)}`),
       );
@@ -1100,6 +1117,12 @@ export function apply(ctx: any, rawConfig: unknown): void {
         start: (chatId) => setupFlow.start(chatId),
         getActiveQr: () => setupFlow.getActiveQr(),
         isBusy: () => setupFlow.isBusy(),
+      },
+      wecomSetup: {
+        start: () => setupFlow.startWecom(undefined),
+        getQr: () => setupFlow.getWecomQr(),
+        isBusy: () => setupFlow.isWecomBusy(),
+        hasCredential: async () => Boolean(await credStore.resolveRaw("WING_WECOM_BOT")),
       },
       logger,
     });

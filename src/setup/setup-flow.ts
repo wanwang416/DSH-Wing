@@ -25,7 +25,7 @@ export interface SetupFlowDeps {
   /** 失败通知（同上，仅 chatId 有值） */
   failNotify?(chatId: string, message: string): void;
   /** 企微扫码绑定流程的专属回调（index.ts 注入；缺省则企微流程不可用） */
-  wecom?: { persist(result: { botId: string; secret: string }): Promise<void>; notify?(chatId: string): void; failNotify?(chatId: string, message: string): void; onStatus?(message: string): void };
+  wecom?: { persist(result: { botId: string; secret: string }): Promise<void>; notify?(chatId: string): void; failNotify?(chatId: string, message: string): void; onStatus?(message: string): void; source?: string };
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
 }
 
@@ -44,6 +44,8 @@ export interface SetupFlow {
   startWecom(chatId?: string): Promise<{ url: string; expireIn: number } | undefined>;
   /** 企微扫码流程是否进行中（防重复触发） */
   isWecomBusy(): boolean;
+  /** Web /wecom/qr route 读取：当前有效企微二维码 PNG（未过期）；无则 undefined */
+  getWecomQr(): { png: Buffer; expireAt: number } | undefined;
 }
 
 const ABORTED = "Registration was aborted";
@@ -53,10 +55,13 @@ export function createSetupFlow(deps: SetupFlowDeps): SetupFlow {
   let wecomInflight = false; // 企微扫码流程进行中（防重）
   let epoch = 0; // 流程代数：每次 start 递增；完成/失败再递增，使挂起的 toPngBuffer 写入失效
   let activeQr: { png: Buffer; expireAt: number } | undefined;
+  let wecomEpoch = 0; // 企微流程代数（同 epoch 语义，防复活旧企微二维码）
+  let wecomActiveQr: { png: Buffer; expireAt: number } | undefined;
 
   return {
     isBusy: () => inflight,
     getActiveQr: () => (activeQr && Date.now() < activeQr.expireAt ? activeQr : undefined),
+    getWecomQr: () => (wecomActiveQr && Date.now() < wecomActiveQr.expireAt ? wecomActiveQr : undefined),
 
     async start(chatId) {
       if (inflight) return undefined; // 防重：上次流程未结束
@@ -120,16 +125,23 @@ export function createSetupFlow(deps: SetupFlowDeps): SetupFlow {
     async startWecom(chatId) {
       if (wecomInflight) return undefined; // 防重
       wecomInflight = true;
+      const myWecomEpoch = ++wecomEpoch;
       let info: { url: string; expireIn: number } | undefined;
       void (async () => {
         try {
-          const start = await startWecomQrLogin({});
+          const start = await startWecomQrLogin({ source: deps.wecom?.source }); // D7a：source 配置化透传
           deps.wecom?.onStatus?.(`企微二维码已生成，请在 ${Math.round((start.expiresAt - Date.now()) / 1000)} 秒内扫码`);
           info = { url: start.verificationUrl, expireIn: Math.round((start.expiresAt - Date.now()) / 1000) };
+          // M2：缓存企微二维码 PNG（Web /wecom/qr route 读取；epoch 防复活）
+          void toPngBuffer(start.verificationUrl).then((png) => {
+            if (png && myWecomEpoch === wecomEpoch) wecomActiveQr = { png, expireAt: start.expiresAt };
+          });
           const deadline = start.expiresAt;
           for (;;) {
             if (Date.now() > deadline) {
-              deps.wecom?.failNotify?.(chatId ?? "", "二维码已过期，请重新发起 /setup wecom。");
+              if (chatId) deps.wecom?.failNotify?.(chatId, "二维码已过期，请重新发起 /setup wecom。"); // N5：空 chatId 不发通知
+              wecomEpoch++;
+              wecomActiveQr = undefined;
               break;
             }
             await new Promise((r) => setTimeout(r, WECOM_POLL_INTERVAL_MS));
@@ -137,16 +149,22 @@ export function createSetupFlow(deps: SetupFlowDeps): SetupFlow {
             if (res.connected) {
               await deps.wecom?.persist({ botId: res.botId, secret: res.secret });
               await deps.restart();
-              deps.wecom?.notify?.(chatId ?? "");
+              if (chatId) deps.wecom?.notify?.(chatId); // N5
+              wecomEpoch++;
+              wecomActiveQr = undefined;
               break;
             }
             if (res.status === "waiting") continue;
-            deps.wecom?.failNotify?.(chatId ?? "", res.message);
+            if (chatId) deps.wecom?.failNotify?.(chatId, res.message); // N5
+            wecomEpoch++;
+            wecomActiveQr = undefined;
             break;
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          deps.wecom?.failNotify?.(chatId ?? "", `企微扫码绑定失败：${message}`);
+          if (chatId) deps.wecom?.failNotify?.(chatId, `企微扫码绑定失败：${message}`); // N5
+          wecomEpoch++;
+          wecomActiveQr = undefined;
         } finally {
           wecomInflight = false;
         }

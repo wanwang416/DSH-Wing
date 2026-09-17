@@ -1,6 +1,17 @@
 # Changelog
 
-> 里程碑记录：M0 → M4.2。commit 历史已脱敏，详见 `git log`。
+> 里程碑记录：M0 → M4.2 → 企微线路（2026-09-17）。commit 历史已脱敏，详见 `git log`。
+
+## 企业微信智能机器人线路（2026-09-17）
+
+- `feat` 企微智能机器人·长连接（WebSocket）双向对话线路——单聊 p2p 直通为主场景，群聊走 groupPolicy（@机器人名精确触发，`wecom.botName`）
+- `feat` 扫码创建/绑定（`POST /plugins/dsh-wing/wecom/setup` + `GET /plugins/dsh-wing/wecom/qr`，浏览器开 URL 即可扫码；已绑定返回 409，`?force=1` 重绑）；手填 BotID/Secret 为兜底（配置或环境变量）
+- `feat` 凭据闭环：扫码写入 `WING_WECOM_BOT` → `resolveRaw` 动态读取 → 不重启宿主即生效；`wecom.enabled` 三态（false 显式关 / true 开 / 缺省有凭据开）
+- `feat` 流式回复（replyStream）+ 字节分片（帧回复 4000B/片、流式 19000B/片、末片 finish）+ 限频保护（超 13 片截断提示）
+- `fix` 帧回复单位混用（字符→字节）、流式 finish 语义、无帧降级重复刷屏、欢迎语 5 秒窗口保持单片
+- `chore` README 企微一节、package.json 描述与 keywords 同步
+- `test` 全量通过（含企微与返工新增用例）
+- `note` Web 面板前端企微入口（D7b）另立工单
 
 ## M4.2 · 扫码创建机器人 + Web 面板（2026-08-30）
 

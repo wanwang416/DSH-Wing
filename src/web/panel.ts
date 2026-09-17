@@ -39,6 +39,13 @@ export interface WingPanelDeps {
     getActiveQr(): { png: Buffer; expireAt: number } | undefined;
     isBusy(): boolean;
   };
+  /** 企微扫码流程（M2：面板通道；N6：hasCredential 防误扫重绑） */
+  wecomSetup: {
+    start(): Promise<{ url: string; expireIn: number } | undefined>;
+    getQr(): { png: Buffer; expireAt: number } | undefined;
+    isBusy(): boolean;
+    hasCredential(): Promise<boolean>;
+  };
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
 }
 
@@ -121,6 +128,63 @@ export function createWingPanel(deps: WingPanelDeps) {
           void deps.setup.start(undefined); // 后台注册，QR 经 /qr 供面板轮询
           r.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           r.end(JSON.stringify({ ok: true }));
+        },
+      });
+
+      // POST wecom/setup（M2：Web 触发企微扫码注册；无 chatId → 静默完成）
+      webServer.register({
+        kind: "exact",
+        path: "/plugins/dsh-wing/wecom/setup",
+        handler: (req, res) => {
+          const r = res as ResLike;
+          const { method = "" } = req as ReqLike;
+          if (method.toUpperCase() !== "POST") {
+            r.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+            r.end(JSON.stringify({ ok: false, reason: "method not allowed" }));
+            return;
+          }
+          if (deps.wecomSetup.isBusy()) {
+            r.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+            r.end(JSON.stringify({ ok: false, reason: "busy" }));
+            return;
+          }
+          deps.logger?.info?.("web panel: 触发 /wecom/setup");
+          void deps.wecomSetup.start(); // 后台注册，QR 经 /wecom/qr 读取
+          r.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          r.end(JSON.stringify({ ok: true }));
+        },
+      });
+
+      // GET wecom/qr（M2/N4/N6）：当前企微二维码 PNG；无活跃流程自动发起（isWecomBusy 幂等）；已绑定且无流程 → 409
+      webServer.register({
+        kind: "exact",
+        path: "/plugins/dsh-wing/wecom/qr",
+        handler: async (req, res) => {
+          const r = res as ResLike;
+          const { url = "" } = req as ReqLike;
+          const qr = deps.wecomSetup.getQr();
+          if (qr) {
+            r.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "no-store" });
+            r.end(qr.png);
+            return;
+          }
+          const force = url.includes("force=1");
+          if (!force && (await deps.wecomSetup.hasCredential()) && !deps.wecomSetup.isBusy()) {
+            // N6：已绑定且无活跃流程 → 409，防误扫重绑
+            r.writeHead(409, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+            r.end(JSON.stringify({ ok: false, reason: "企微机器人已绑定；如需重新绑定请用 ?force=1 或先清除 WING_WECOM_BOT 凭据" }));
+            return;
+          }
+          if (!deps.wecomSetup.isBusy()) {
+            // N4：自动发起一次（幂等），浏览器只需打开本 URL
+            deps.logger?.info?.("web panel: /wecom/qr 无活跃流程，自动发起企微扫码");
+            void deps.wecomSetup.start();
+            r.writeHead(202, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+            r.end(JSON.stringify({ ok: true, message: "企微扫码流程已发起，请约 2 秒后刷新本 URL 查看二维码" }));
+            return;
+          }
+          r.writeHead(202, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+          r.end(JSON.stringify({ ok: false, reason: "企微扫码流程进行中，二维码生成后请刷新本 URL" }));
         },
       });
     },

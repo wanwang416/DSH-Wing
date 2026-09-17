@@ -53,9 +53,16 @@ function makeDeps(overrides: Partial<Parameters<typeof createWingPanel>[0]> = {}
     getActiveQr: vi.fn(() => undefined),
     isBusy: vi.fn(() => false),
   };
+  const wecomSetup = {
+    start: vi.fn(async () => ({ url: "https://qr-wecom", expireIn: 600 })),
+    getQr: vi.fn(() => undefined),
+    isBusy: vi.fn(() => false),
+    hasCredential: vi.fn(async () => false),
+  };
   return {
-    deps: { status, setup, resolveCredential: vi.fn(async () => ({ appId: "cli_abcdefgh1234" })), ...overrides },
+    deps: { status, setup, wecomSetup, resolveCredential: vi.fn(async () => ({ appId: "cli_abcdefgh1234" })), ...overrides },
     setup,
+    wecomSetup,
   };
 }
 
@@ -80,6 +87,8 @@ describe("createWingPanel routes", () => {
       "/plugins/dsh-wing/status",
       "/plugins/dsh-wing/qr",
       "/plugins/dsh-wing/setup",
+      "/plugins/dsh-wing/wecom/setup",
+      "/plugins/dsh-wing/wecom/qr",
     ]);
     expect(routes.every((r) => r.kind === "exact")).toBe(true);
   });
@@ -162,3 +171,86 @@ describe("createWingPanel routes", () => {
     expect(calls3[0].status).toBe(405);
   });
 });
+
+describe("createWingPanel wecom routes（M2/N4/N6）", () => {
+  const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 1]);
+  const idx = (routes: any[], path: string) => routes.findIndex((r) => r.path === path);
+  const QR = "/plugins/dsh-wing/wecom/qr";
+  const SETUP = "/plugins/dsh-wing/wecom/setup";
+
+  it("POST wecom/setup → ok:true + start()；busy → busy；GET → 405", async () => {
+    const { server, routes } = mockWebServer();
+    const { deps, wecomSetup } = makeDeps();
+    createWingPanel(deps).register(server);
+    const i = idx(routes, SETUP);
+    const { res, calls } = fakeRes();
+    await routes[i].handler({ method: "POST" }, res);
+    expect(calls[0].status).toBe(200);
+    expect(JSON.parse(String(calls[1].body))).toEqual({ ok: true });
+    expect(wecomSetup.start).toHaveBeenCalledTimes(1);
+    // busy → 不重复触发
+    wecomSetup.isBusy.mockReturnValue(true);
+    const { res: res2, calls: calls2 } = fakeRes();
+    await routes[i].handler({ method: "POST" }, res2);
+    expect(JSON.parse(String(calls2[1].body))).toEqual({ ok: false, reason: "busy" });
+    expect(wecomSetup.start).toHaveBeenCalledTimes(1);
+    // GET → 405
+    const { res: res3, calls: calls3 } = fakeRes();
+    await routes[i].handler({ method: "GET" }, res3);
+    expect(calls3[0].status).toBe(405);
+  });
+
+  it("GET wecom/qr 有 QR → 200 PNG", async () => {
+    const { server, routes } = mockWebServer();
+    const { deps, wecomSetup } = makeDeps();
+    wecomSetup.getQr.mockReturnValue({ png: PNG, expireAt: Date.now() + 60_000 });
+    createWingPanel(deps).register(server);
+    const i = idx(routes, QR);
+    const { res, calls } = fakeRes();
+    await routes[i].handler({}, res);
+    expect(calls[0].status).toBe(200);
+    expect(calls[0].headers?.["Content-Type"]).toBe("image/png");
+    expect(Buffer.isBuffer(calls[1].body)).toBe(true);
+  });
+
+  it("GET wecom/qr 无 QR 无凭据 → 202 自动发起（N4）", async () => {
+    const { server, routes } = mockWebServer();
+    const { deps, wecomSetup } = makeDeps();
+    createWingPanel(deps).register(server);
+    const i = idx(routes, QR);
+    const { res, calls } = fakeRes();
+    await routes[i].handler({}, res);
+    expect(calls[0].status).toBe(202);
+    expect(wecomSetup.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("GET wecom/qr 已绑定且无流程 → 409；?force=1 → 202（N6）", async () => {
+    const { server, routes } = mockWebServer();
+    const { deps, wecomSetup } = makeDeps();
+    wecomSetup.hasCredential.mockResolvedValue(true);
+    createWingPanel(deps).register(server);
+    const i = idx(routes, QR);
+    const { res, calls } = fakeRes();
+    await routes[i].handler({ url: QR }, res);
+    expect(calls[0].status).toBe(409);
+    expect(wecomSetup.start).not.toHaveBeenCalled();
+    const { res: res2, calls: calls2 } = fakeRes();
+    await routes[i].handler({ url: QR + "?force=1" }, res2);
+    expect(calls2[0].status).toBe(202);
+    expect(wecomSetup.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("GET wecom/qr busy 无 QR → 202 进行中，不重复发起", async () => {
+    const { server, routes } = mockWebServer();
+    const { deps, wecomSetup } = makeDeps();
+    wecomSetup.isBusy.mockReturnValue(true);
+    createWingPanel(deps).register(server);
+    const i = idx(routes, QR);
+    const { res, calls } = fakeRes();
+    await routes[i].handler({}, res);
+    expect(calls[0].status).toBe(202);
+    expect(String(calls[1].body)).toContain("进行中");
+    expect(wecomSetup.start).not.toHaveBeenCalled();
+  });
+});
+

@@ -16,6 +16,8 @@ export interface OutboxEnvelope {
   id: string;
   dedupeKey: string;
   chatId: string;
+  /** 来源平台（S6：deliver 判定优先用显式标记；未标记走启发式兜底） */
+  platform?: "feishu" | "wecom";
   kind: "text" | "card" | "reaction";
   payload: { kind: string; text?: string; card?: unknown; messageId?: string; emojiType?: string };
   status: "pending" | "sending" | "done" | "failed";
@@ -101,6 +103,7 @@ export function createOutbox(deps: OutboxDeps) {
   function enqueue(input: {
     dedupeKey: string;
     chatId: string;
+    platform?: "feishu" | "wecom";
     kind: OutboxEnvelope["kind"];
     payload: OutboxEnvelope["payload"];
   }): string {
@@ -109,6 +112,7 @@ export function createOutbox(deps: OutboxDeps) {
       id: randomUUID(),
       dedupeKey: input.dedupeKey,
       chatId: input.chatId,
+      platform: input.platform, // S6：显式平台标记（JSONL 落盘持久化）
       kind: input.kind,
       payload: input.payload,
       status: "pending",

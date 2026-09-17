@@ -77,23 +77,61 @@ function summarizeNonText(msgType: string | undefined): string | undefined {
   }
 }
 
-/** 提取企微群聊文本中的 @提及（@后跟非空白串），供 stripMentions 剥除 */
-export function extractWecomMentions(text: string): string[] {
+/** 提取企微群聊文本中的 @提及（半角 @ / 全角 ＠；D2/A：botName 有值时仅精确匹配机器人显示名） */
+export function extractWecomMentions(text: string, botName?: string): string[] {
   const out: string[] = [];
-  const re = /@([^\s，。！？!?]+)/g;
+  const atRe = /[@＠]/g;
+  const normBot = botName?.replace(/\s+/g, "").toLowerCase();
   let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const name = m[1]?.trim();
-    if (name) out.push(`@${name}`);
+  while ((m = atRe.exec(text)) !== null) {
+    const rest = text.slice(m.index + 1);
+    if (normBot) {
+      // 精确匹配：跳过空白逐字符收集，收集长度对齐 normBot；去空白相等才算命中
+      const name = matchAtName(rest, normBot);
+      if (name) out.push(`@${name}`);
+      continue;
+    }
+    const word = rest.match(/^[^\s，。！？!?]+/);
+    if (word) out.push(`@${word[0]}`); // 未配置 botName → 宽松（S5：index 侧提示补配）
   }
   return out;
+}
+
+/** D2/A：@ 后收集到与 normBot 等长的去空白字符窗口（跳过空白），整体去空白一致才命中 */
+function matchAtName(rest: string, normBot: string): string | undefined {
+  let collected = "";
+  let norm = 0;
+  for (const ch of rest) {
+    if (/\s/.test(ch)) {
+      if (collected) collected += ch; // 名字内部空白保留（外部前导空白跳过）
+      continue;
+    }
+    collected += ch;
+    norm += 1;
+    if (norm >= normBot.length) break;
+  }
+  const cand = collected.replace(/\s+/g, "").toLowerCase();
+  return cand === normBot ? collected : undefined;
+}
+
+/** S5：首条群聊消息诊断日志消费（核对 botName 与企微后台显示名是否一致；进程内仅一次） */
+let groupDiagLogged = false;
+export function consumeWecomGroupDiag(): boolean {
+  if (groupDiagLogged) return false;
+  groupDiagLogged = true;
+  return true;
+}
+
+export interface WecomInboundOptions {
+  /** 群聊 @ 机器人显示名（D2/A；未配置维持宽松） */
+  botName?: string;
 }
 
 /**
  * 企微消息回调 body → ParsedMessage；无法路由时返回 undefined。
  * 无 sender userid 或无可解析文本 → 返回 undefined。
  */
-export function parseWecomInbound(body: WecomInboundBody | undefined): ParsedMessage | undefined {
+export function parseWecomInbound(body: WecomInboundBody | undefined, opts: WecomInboundOptions = {}): ParsedMessage | undefined {
   if (!body) return undefined;
   const messageId = body.msgid;
   const senderUserId = body.from?.userid;
@@ -110,7 +148,7 @@ export function parseWecomInbound(body: WecomInboundBody | undefined): ParsedMes
   const finalText = summarized ?? rawText;
   if (!finalText.trim()) return undefined;
 
-  const mentions = extractWecomMentions(finalText);
+  const mentions = extractWecomMentions(finalText, opts.botName);
 
   return {
     messageId,

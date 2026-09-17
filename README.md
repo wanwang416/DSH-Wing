@@ -190,6 +190,34 @@ node scripts/diag-listen.mjs
 
 ---
 
+## 💬 WeCom (WeChat Work) Intelligent Bot Line / 企业微信智能机器人线路
+
+> 长连接（WebSocket）双向对话，与飞书线路并存；单聊（p2p）直通为主场景，群聊走 `groupPolicy`（@机器人名精确触发）。
+
+### Enable / 启用（二选一）
+
+1. **扫码绑定（默认）**：浏览器打开 `GET /plugins/dsh-wing/wecom/qr`（无活跃流程自动发起扫码；已绑定返回 409，`?force=1` 重新绑定）→ 企微 App 扫码 → 凭据写入 `WING_WECOM_BOT` → 自动重启桥生效（无需重启宿主）。
+2. **手填兜底**：配置 `wecom.botId` / `wecom.secret`，或环境变量 `WECOM_BOT_ID` / `WECOM_BOT_SECRET`。
+
+### Config / 配置
+
+```yaml
+wecom:
+  enabled: true            # true=开；缺省=有凭据即开；false=显式关闭
+  botName: ''              # 群聊 @机器人名（精确触发，需与企微后台显示名一致）
+  source: dsh-wing         # 扫码绑定来源标识（多 Agent 隔离）
+  welcomeText: '你好，我是 DSH 智能助手。直接发消息即可开始对话。'
+```
+
+### Notes / 说明
+
+- 群聊仅「@机器人名」触发（未配置 `botName` 时维持宽松并提示）；首条群聊消息输出诊断日志核对名字拼写。
+- 帧回复按字节分片（4000B/片，超 13 片截断提示）；流式单帧 19000B，仅末片 `finish`；欢迎语受企微 5 秒窗口约束保持单片。
+- 单会话限频 30 条/分钟，长回答自动分片共用配额。
+- Web 面板前端企微入口（D7b）另立工单。
+
+---
+
 ## 📋 Command Reference / 命令参考
 
 | Command / 命令 | Description / 说明 |

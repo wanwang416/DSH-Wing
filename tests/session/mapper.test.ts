@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { sessionKey, makeSessionId, bumpGeneration, resetGeneration, resetRunNonce, createSessionMapper } from "../../src/session/mapper.js";
+import { sessionKey, makeSessionId, bumpGeneration, resetGeneration, resetRunNonce, createSessionMapper, rememberPlatform, chatPlatform } from "../../src/session/mapper.js";
 
 describe("sessionKey（铁律 2：前缀隔离）", () => {
   it("格式为 feishu:<chatId>，绝不复用 Web GUI 会话", () => {
@@ -73,3 +73,17 @@ describe("session mapper", () => {
     expect(mapper.size()).toBe(1);
   });
 });
+
+describe("平台登记（D6/S6：deliver 分发优先判定）", () => {
+  it("rememberPlatform 后 chatPlatform 返回；未登记 undefined", () => {
+    expect(chatPlatform("oc_x")).toBeUndefined();
+    rememberPlatform("oc_x", "feishu");
+    expect(chatPlatform("oc_x")).toBe("feishu");
+    rememberPlatform("wb_1", "wecom");
+    expect(chatPlatform("wb_1")).toBe("wecom");
+    // 覆盖登记
+    rememberPlatform("oc_x", "wecom");
+    expect(chatPlatform("oc_x")).toBe("wecom");
+  });
+});
+

@@ -134,3 +134,16 @@ describe("stripMentions 剥离 @bot", () => {
     expect(stripMentions("@wing hi", [], "ou_bot")).toBe("hi");
   });
 });
+
+describe("stripMentions：S2 全角@/含空格名/死代码清理", () => {
+  it("全角 ＠ 剥离", () => {
+    expect(stripMentions("＠wing 早上好", [], "ou_bot")).toBe("早上好");
+  });
+  it("含空格 botName 按 mentions 精确剥离（不再截断在空格）", () => {
+    expect(stripMentions("@DSH 助手 帮我查天气", ["@DSH 助手"])).toBe("帮我查天气");
+  });
+  it("mentions 未命中 → 兜底剥任意 @ 前缀", () => {
+    expect(stripMentions("@wing hi", [], "ou_bot")).toBe("hi");
+  });
+});
+

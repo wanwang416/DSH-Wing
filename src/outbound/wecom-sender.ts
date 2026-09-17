@@ -15,6 +15,8 @@ import type { WsFrame } from "@wecom/aibot-node-sdk";
 const WECOM_STREAM_BYTE_LIMIT = 19_000;
 /** markdown 主动推送保守分片 */
 const WECOM_TEXT_BYTE_LIMIT = 4_000;
+/** S7：帧回复分片上限（单会话 30 条/分限频账，约 5 万字节封顶，超出截断提示） */
+const WECOM_MAX_TEXT_CHUNKS = 13;
 
 /** 字节长度（UTF-8） */
 export function utf8Length(text: string): number {
@@ -98,20 +100,33 @@ export function createWecomSender(deps: WecomSenderDeps) {
       return activeStreams.has(chatId);
     },
 
-    /** 发送文本回复：优先帧回复，无帧则 markdown 主动推送 */
+    /** N1(a)：当前是否有可用的回调帧（无帧 → 流式会降级直发；供上层提前判定避免中途直发） */
+    canReply(chatId: string): boolean {
+      const c = client();
+      return c?.replyFrameFor(chatId) !== undefined;
+    },
+
+    /** 发送文本回复：优先帧回复（R2：按字节分片，S7：超 13 片截断），无帧则 markdown 主动推送 */
     async sendText(chatId: string, text: string): Promise<unknown> {
       const c = client();
       if (!c) throw new Error("企微客户端未就绪");
       const frame = c.replyFrameFor(chatId);
-      if (frame) {
-        return withRetry(() =>
+      if (!frame) return this.sendMarkdown(chatId, text);
+      let chunks = splitMessageByBytes(text, WECOM_TEXT_BYTE_LIMIT);
+      if (chunks.length > WECOM_MAX_TEXT_CHUNKS) {
+        const tail = chunks.slice(WECOM_MAX_TEXT_CHUNKS - 1).join("").slice(0, WECOM_TEXT_BYTE_LIMIT) + "\n…（回答过长已截断）";
+        chunks = [...chunks.slice(0, WECOM_MAX_TEXT_CHUNKS - 1), tail];
+        deps.logger?.warn?.(`企微帧回复超 ${WECOM_MAX_TEXT_CHUNKS} 片已截断（chatId=${chatId}）`);
+      }
+      for (const chunk of chunks) {
+        await withRetry(() =>
           c.reply(frame, {
             msgtype: "text",
-            text: { content: text.slice(0, WECOM_TEXT_BYTE_LIMIT) },
+            text: { content: chunk },
           }),
         );
       }
-      return this.sendMarkdown(chatId, text);
+      return undefined;
     },
 
     /** 主动推送 markdown（sendMessage 通道，无需回调帧） */
@@ -156,8 +171,9 @@ export function createWecomSender(deps: WecomSenderDeps) {
         return this.sendMarkdown(handle.chatId, content);
       }
       const chunks = splitMessageByBytes(content, WECOM_STREAM_BYTE_LIMIT);
-      for (const chunk of chunks) {
-        await withRetry(() => c.replyStream(frame, handle.streamId, chunk, finish));
+      for (let i = 0; i < chunks.length; i++) {
+        const isLast = i === chunks.length - 1;
+        await withRetry(() => c.replyStream(frame, handle.streamId, chunks[i], finish && isLast)); // R3：仅末片透传 finish
       }
       if (finish) activeStreams.delete(handle.chatId);
       return undefined;
@@ -167,10 +183,15 @@ export function createWecomSender(deps: WecomSenderDeps) {
     async sendWelcome(frame: WsFrame, text: string): Promise<unknown> {
       const c = client();
       if (!c) throw new Error("企微客户端未就绪");
+      // S3：欢迎语有 5 秒回复窗口，保持单片（字节截断，不切分多片）
+      const first = splitMessageByBytes(text, WECOM_TEXT_BYTE_LIMIT)[0] ?? "";
+      if (utf8Length(text) > WECOM_TEXT_BYTE_LIMIT) {
+        deps.logger?.warn?.(`企微欢迎语 ${utf8Length(text)} 字节超限，已按 ${WECOM_TEXT_BYTE_LIMIT} 字节截断（5 秒窗口内单片发送）`);
+      }
       return withRetry(() =>
         c.replyWelcome(frame, {
           msgtype: "text",
-          text: { content: text.slice(0, WECOM_TEXT_BYTE_LIMIT) },
+          text: { content: first },
         }),
       );
     },

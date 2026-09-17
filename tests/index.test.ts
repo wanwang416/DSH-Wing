@@ -22,6 +22,7 @@ const h = vi.hoisted(() => {
     disposeAsk: vi.fn(),
     clients: [] as any[],
     enqueued: [] as any[],
+    wecomClients: [] as any[],
     // 行为开关（测试逐个设置）
     nextAction: "queued" as string,
     nextTextInbound: false,
@@ -100,10 +101,34 @@ vi.mock("../src/host/client.js", () => ({
 
 vi.mock("../src/host/credentials.js", () => ({
   createCredentialStore: vi.fn(() => ({
-    resolve: () => h.credResolve(),
+    resolve: (ref: string) => h.credResolve(ref),
+    resolveRaw: async (ref: string) => {
+      // R1/M1：复刻真实 resolveRaw 语义（value ?? resolved + JSON.parse 容错）
+      const r = await h.credResolve(ref);
+      const v = (r as any)?.value ?? r;
+      if (typeof v === "string") {
+        try { return JSON.parse(v); } catch { return undefined; }
+      }
+      return v;
+    },
     set: vi.fn(),
     unset: vi.fn(),
   })),
+}));
+
+vi.mock("../src/host/wecom-client.js", () => ({
+  createWecomClient: vi.fn((opts: any) => {
+    h.wecomClients.push({ opts });
+    return {
+      opts,
+      onMessage: vi.fn(),
+      onEvent: vi.fn(),
+      onConnState: vi.fn(),
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+      isConnected: () => true,
+    };
+  }),
 }));
 
 vi.mock("../src/host/status.js", () => ({
@@ -296,7 +321,7 @@ beforeEach(() => {
   h.nextAction = "queued";
   h.nextTextInbound = false;
   h.shouldProcess = true;
-  h.credResolve = async () => ({ appId: "a", appSecret: "s", domain: "feishu" });
+  h.credResolve = async (_ref?: string) => ({ appId: "a", appSecret: "s", domain: "feishu" });
   h.replays = [];
   h.replayMarked = true;
   h.supervisorFail = false;
@@ -529,3 +554,58 @@ describe("index.ts apply 集成（M4 覆盖重构）", () => {
     // sweep 里 mapper.空闲清理(30min) → 0 agent → refreshCounters sessions
   });
 });
+
+describe("企微线路启动判定（R1/M1/S1）", () => {
+  const wecomCred = { value: '{"botId":"wb_1","secret":"s1"}' };
+  const splitCred = async (ref?: string) =>
+    ref === "WING_WECOM_BOT" ? wecomCred : { appId: "a", appSecret: "s", domain: "feishu" };
+  const feishuOnly = async () => ({ appId: "a", appSecret: "s", domain: "feishu" });
+
+  async function startRaw(ctx: any, raw: Record<string, unknown>): Promise<() => Promise<void>> {
+    apply(ctx, raw);
+    const cleanup = h.effectFn() as unknown as () => Promise<void>;
+    return cleanup;
+  }
+
+  beforeEach(() => {
+    h.wecomClients.length = 0;
+  });
+
+  it("仅凭据（enabled 缺省）→ 自动启动（resolveRaw 读 WING_WECOM_BOT）", async () => {
+    h.credResolve = splitCred;
+    const ctx = makeCtx();
+    const cleanup = await startRaw(ctx, {});
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("企微线路已启动")));
+    expect(h.wecomClients.length).toBe(1);
+    await cleanup();
+  });
+
+  it("配置优先：enabled=true + 配置 botId/secret → createWecomClient 用配置值", async () => {
+    h.credResolve = splitCred;
+    const ctx = makeCtx();
+    const cleanup = await startRaw(ctx, { wecom: { enabled: true, botId: "cfg_bot", secret: "cfg_secret" } });
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("企微线路已启动")));
+    expect(h.wecomClients[0].opts).toMatchObject({ botId: "cfg_bot", secret: "cfg_secret" });
+    await cleanup();
+  });
+
+  it("enabled=false 显式关闭 → 跳过启动（即使存在凭据）", async () => {
+    h.credResolve = splitCred;
+    const ctx = makeCtx();
+    const cleanup = await startRaw(ctx, { wecom: { enabled: false } });
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("企微线路已显式关闭")));
+    expect(h.wecomClients.length).toBe(0);
+    await cleanup();
+  });
+
+  it("均缺（未配置且无凭据）→ 提示未启用，不启动（S4 判据日志）", async () => {
+    // 飞书凭据保留（保证 startBridge 走到企微段）；WING_WECOM_BOT 无凭据（resolveRaw → undefined）
+    h.credResolve = async (ref?: string) => (ref === "WING_WECOM_BOT" ? undefined : { appId: "a", appSecret: "s", domain: "feishu" });
+    const ctx = makeCtx();
+    const cleanup = await startRaw(ctx, {});
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("企微线路未启用")));
+    expect(h.wecomClients.length).toBe(0);
+    await cleanup();
+  });
+});
+

@@ -161,3 +161,36 @@ describe("outbox", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("outbox：S6 平台标记", () => {
+  it("enqueue 带 platform → deliver 收到 platform 字段；重启 rebuild 后保留", async () => {
+    const dir = tmpDir();
+    // 首轮：deliver 永不 resolve → 消息遗留磁盘（模拟进程被杀）
+    const deliver1 = vi.fn().mockImplementation(() => new Promise(() => {}));
+    const outbox1 = createOutbox({ dir, deliver: deliver1 });
+    await outbox1.start();
+    outbox1.enqueue({
+      dedupeKey: "k-wecom",
+      chatId: "wb_1",
+      platform: "wecom",
+      kind: "text",
+      payload: { kind: "text", text: "hi" },
+    });
+    await sleep(50);
+    await outbox1.stop();
+    // 重启 rebuild → 遗留信封带 platform 字段续投
+    const deliver2 = vi.fn().mockResolvedValue({ ok: true });
+    const outbox2 = createOutbox({ dir, deliver: deliver2 });
+    await outbox2.start();
+    await sleep(200);
+    const env2 = deliver2.mock.calls.find(
+      (c) => (c[0] as OutboxEnvelope).dedupeKey === "k-wecom",
+    )?.[0] as OutboxEnvelope;
+    expect(env2).toBeDefined();
+    expect(env2.platform).toBe("wecom");
+    expect(env2.chatId).toBe("wb_1");
+    await outbox2.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+

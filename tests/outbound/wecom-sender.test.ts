@@ -140,3 +140,65 @@ describe("createWecomSender：流式", () => {
     await expect(sender.sendText("u1", "hi")).rejects.toThrow("未就绪");
   });
 });
+
+describe("createWecomSender：返工 R2/R3/S3/S7", () => {
+  it("R2：帧回复超 4000 字节 → 按字节分片逐片 reply，每片 ≤4000B", async () => {
+    const m = makeClient();
+    m.replyFrameFor.mockReturnValue(FRAME);
+    const sender = makeSender(m.client);
+    await sender.sendText("u1", "中".repeat(8000));
+    expect(m.reply.mock.calls.length).toBeGreaterThan(1);
+    for (const call of m.reply.mock.calls) {
+      const content = call[1].text.content as string;
+      expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(4000);
+    }
+    expect(m.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it("S7：帧回复超 13 片 → 截断为 13 片 + warn 提示", async () => {
+    const m = makeClient();
+    m.replyFrameFor.mockReturnValue(FRAME);
+    const logger = { warn: vi.fn(), error: vi.fn() };
+    const sender = createWecomSender({ getClient: () => m.client, logger });
+    await sender.sendText("u1", "中".repeat(20000)); // 60000B → 15 片
+    expect(m.reply.mock.calls.length).toBe(13);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("截断"));
+    const last = m.reply.mock.calls[12][1].text.content as string;
+    expect(last).toContain("回答过长已截断");
+  });
+
+  it("S3：欢迎语超 4000 字节 → 保持单片（replyWelcome 恰好一次）+ 字节截断 + warn", async () => {
+    const m = makeClient();
+    const logger = { warn: vi.fn(), error: vi.fn() };
+    const sender = createWecomSender({ getClient: () => m.client, logger });
+    await sender.sendWelcome(FRAME, "中".repeat(5000));
+    expect(m.replyWelcome).toHaveBeenCalledTimes(1);
+    const content = m.replyWelcome.mock.calls[0][1].text.content as string;
+    expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(4000);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("欢迎语"));
+  });
+
+  it("R3：流式超 19000 字节 finish=true → 仅末片 finish=true", async () => {
+    const m = makeClient();
+    m.replyFrameFor.mockReturnValue(FRAME);
+    const sender = makeSender(m.client);
+    const handle = await sender.beginStream("u1", "a");
+    await sender.stream(handle, "中".repeat(20000), true);
+    const calls = m.replyStream.mock.calls;
+    expect(calls.length).toBeGreaterThan(1);
+    for (let i = 0; i < calls.length; i++) {
+      const finishFlag = calls[i][3] as boolean;
+      expect(finishFlag).toBe(i === calls.length - 1);
+    }
+    expect(sender.hasActiveStream("u1")).toBe(false);
+  });
+
+  it("canReply：有回调帧 true / 无回调帧 false（N1a）", async () => {
+    const m = makeClient();
+    const sender = makeSender(m.client);
+    expect(sender.canReply("u1")).toBe(false);
+    m.replyFrameFor.mockReturnValue(FRAME);
+    expect(sender.canReply("u1")).toBe(true);
+  });
+});
+

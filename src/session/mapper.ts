@@ -51,6 +51,17 @@ export function resetRunNonce(): void {
   runNonce = randomBytes(6).toString("hex");
 }
 
+/** chatId → 平台登记表（D6/S6：handleInbound 入站时登记，供 outbox/StreamCard 分发优先判定，启发式仅兜底） */
+const platformRegistry = new Map<string, "feishu" | "wecom">();
+
+export function rememberPlatform(chatId: string, platform: "feishu" | "wecom"): void {
+  platformRegistry.set(chatId, platform);
+}
+
+export function chatPlatform(chatId: string): "feishu" | "wecom" | undefined {
+  return platformRegistry.get(chatId);
+}
+
 export interface AgentHandleLike {
   agentId: string;
   sessionId: string;

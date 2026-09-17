@@ -28,6 +28,7 @@ export class WecomStreamCard implements StreamCardHandle {
   private answer = "";
   private handle: WecomStreamHandle | undefined;
   private failed = false;
+  private degraded = false; // 无回调帧（N1a/M3）：降级为收尾一次发完整终稿，中途不再发送
   private lastStreamAt = 0;
   private lastStreamLen = 0;
   private flushTimer: NodeJS.Timeout | null = null;
@@ -114,10 +115,13 @@ export class WecomStreamCard implements StreamCardHandle {
     this.lastStreamAt = Date.now();
     this.lastStreamLen = this.answer.length;
     if (!this.handle) {
-      // 首个 chunk：开启流式（无回调帧时 sender 内部降级 sendMarkdown 终稿，返回 undefined）
+      // N1(a)：进 beginStream 前判定无回调帧（无帧时 beginStream 内部会先 sendMarkdown，必须前置短路 → 真正零中途发送）
+      if (!this.deps.sender.canReply(this.chatId)) { this.degraded = true; return; }
       this.handle = (await this.deps.sender.beginStream(this.chatId, content)) ?? undefined;
+      if (!this.handle) { this.degraded = true; return; } // 兜底（并发丢帧等边缘）
       return;
     }
+    if (this.degraded) return; // M3：降级后只累积 answer，不调 sender
     await this.deps.sender.stream(this.handle, content, finish);
   }
 
