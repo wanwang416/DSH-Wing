@@ -1,12 +1,15 @@
 /**
- * 企业微信出站发送器：text / markdown / 流式（streamId 关联）。
+ * 企业微信出站发送器：流式（streamId 关联）/ 主动推送 markdown。
  *
  * 企微回复语义与飞书不同：**回复必须携带消息回调的 req_id（帧上下文）**，
  * 因此依赖 wecom-client 维护的「chatId → 最近回调帧」映射：
- *   - 有帧 → replyStream / reply（「回复」语义，保序）
+ *   - 有帧 → replyStream（「回复」语义，保序）
  *   - 无帧（如 outbox 补发、主动通知）→ sendMessage 主动推送（markdown）
- * 字节上限（SDK 限制）：流式单帧 20480 B；保守起见流式按 19000 B 切分，
- * markdown 主动推送按 4000 B 切分（对齐哈马实现）。
+ * ★ 被动回复通道只支持 stream / markdown / template_card / 媒体，**不支持 msgtype:'text'**
+ *   （2026-09-17 真机实锤：text 被企微拒收 errcode=40008 invalid message type；
+ *    对齐基底 D:\ACC\cc-haha-src\adapters\wecom\index.ts——它只用 replyStream 与 sendMessage(markdown)）
+ * 字节上限（SDK 限制）：流式单帧 20480 B；保守起见按 19000 B 切分，
+ * 溢出余量转主动推送（不截断）；markdown 主动推送按 4000 B 切分（对齐哈马实现）。
  */
 
 import type { WsFrame } from "@wecom/aibot-node-sdk";
@@ -15,8 +18,11 @@ import type { WsFrame } from "@wecom/aibot-node-sdk";
 const WECOM_STREAM_BYTE_LIMIT = 19_000;
 /** markdown 主动推送保守分片 */
 const WECOM_TEXT_BYTE_LIMIT = 4_000;
-/** S7：帧回复分片上限（单会话 30 条/分限频账，约 5 万字节封顶，超出截断提示） */
-const WECOM_MAX_TEXT_CHUNKS = 13;
+
+/** 生成企微流式消息 ID（同一 streamId 复用 = 刷新同一气泡） */
+function newStreamId(): string {
+  return `stream_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
 
 /** 字节长度（UTF-8） */
 export function utf8Length(text: string): number {
@@ -106,30 +112,22 @@ export function createWecomSender(deps: WecomSenderDeps) {
       return c?.replyFrameFor(chatId) !== undefined;
     },
 
-    /** 发送文本回复：优先帧回复（R2：按字节分片，S7：超 13 片截断），无帧则 markdown 主动推送 */
+    /**
+     * 发送文本回复（对齐基底 cc-haha 的两条通道）：
+     *   - 有帧 → replyStream 单发（一次成型的流气泡，finish=true）
+     *   - 无帧 → 主动推送 markdown
+     * 超 19000 字节的余量转主动推送，**不截断**（基底同策略）。
+     * ★ 不再使用 msgtype:'text'：企微被动回复通道不认，实测 errcode=40008（2026-09-17 真机）。
+     */
     async sendText(chatId: string, text: string): Promise<unknown> {
       const c = client();
       if (!c) throw new Error("企微客户端未就绪");
+      if (!text.trim()) return undefined;
       const frame = c.replyFrameFor(chatId);
       if (!frame) return this.sendMarkdown(chatId, text);
-      let chunks = splitMessageByBytes(text, WECOM_TEXT_BYTE_LIMIT);
-      if (chunks.length > WECOM_MAX_TEXT_CHUNKS) {
-        // ★ B 修复：尾片必须按字节切分（原实现用 slice 按字符截断，中文最多约 12000 字节，突破 4000 字节上限）
-        const suffix = "\n…（回答过长已截断）";
-        const budget = WECOM_TEXT_BYTE_LIMIT - utf8Length(suffix);
-        const joined = chunks.slice(WECOM_MAX_TEXT_CHUNKS - 1).join("");
-        const tail = (splitMessageByBytes(joined, budget)[0] ?? "") + suffix;
-        chunks = [...chunks.slice(0, WECOM_MAX_TEXT_CHUNKS - 1), tail];
-        deps.logger?.warn?.(`企微帧回复超 ${WECOM_MAX_TEXT_CHUNKS} 片已截断（chatId=${chatId}）`);
-      }
-      for (const chunk of chunks) {
-        await withRetry(() =>
-          c.reply(frame, {
-            msgtype: "text",
-            text: { content: chunk },
-          }),
-        );
-      }
+      const [head = "", ...rest] = splitMessageByBytes(text, WECOM_STREAM_BYTE_LIMIT);
+      await withRetry(() => c.replyStream(frame, newStreamId(), head, true));
+      if (rest.length) await this.sendMarkdown(chatId, rest.join(""));
       return undefined;
     },
 
@@ -158,8 +156,10 @@ export function createWecomSender(deps: WecomSenderDeps) {
         await this.sendMarkdown(chatId, firstChunk);
         return undefined;
       }
-      const streamId = `stream_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-      await withRetry(() => c.replyStream(frame, streamId, firstChunk.slice(0, WECOM_STREAM_BYTE_LIMIT), false));
+      const streamId = newStreamId();
+      // 首片按字节上限取，不用 slice 按字符截断（同一单位混用缺陷族）
+      const head = splitMessageByBytes(firstChunk, WECOM_STREAM_BYTE_LIMIT)[0] ?? "";
+      await withRetry(() => c.replyStream(frame, streamId, head, false));
       activeStreams.set(chatId, streamId);
       return { chatId, streamId };
     },

@@ -47,12 +47,18 @@ describe("splitMessageByBytes", () => {
 });
 
 describe("createWecomSender：帧回复优先", () => {
-  it("sendText：有回调帧 → reply（text 消息体）", async () => {
+  it("sendText：有回调帧 → replyStream 单发 finish=true（★ 不再用 msgtype:'text'，企微 40008 拒收）", async () => {
     const m = makeClient();
     m.replyFrameFor.mockReturnValue(FRAME);
     const sender = makeSender(m.client);
     await sender.sendText("u1", "你好");
-    expect(m.reply).toHaveBeenCalledWith(FRAME, expect.objectContaining({ msgtype: "text", text: { content: "你好" } }));
+    expect(m.reply).not.toHaveBeenCalled(); // 被动回复通道禁用 text 消息体
+    expect(m.replyStream).toHaveBeenCalledTimes(1);
+    const [frame, streamId, content, finish] = m.replyStream.mock.calls[0];
+    expect(frame).toBe(FRAME);
+    expect(typeof streamId).toBe("string");
+    expect(content).toBe("你好");
+    expect(finish).toBe(true);
     expect(m.sendMarkdown).not.toHaveBeenCalled();
   });
 
@@ -147,28 +153,30 @@ describe("createWecomSender：返工 R2/R3/S3/S7", () => {
     m.replyFrameFor.mockReturnValue(FRAME);
     const sender = makeSender(m.client);
     await sender.sendText("u1", "中".repeat(8000));
-    expect(m.reply.mock.calls.length).toBeGreaterThan(1);
-    for (const call of m.reply.mock.calls) {
-      const content = call[1].text.content as string;
-      expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(4000);
-    }
-    expect(m.sendMarkdown).not.toHaveBeenCalled();
+    // 基底对齐后：24000B 超过单帧 19000B → 首段 replyStream 单发，余量转主动推送，不截断
+    expect(m.reply).not.toHaveBeenCalled();
+    expect(m.replyStream).toHaveBeenCalledTimes(1);
+    const [, , first, finish] = m.replyStream.mock.calls[0];
+    expect(finish).toBe(true);
+    expect(Buffer.byteLength(first as string, "utf8")).toBeLessThanOrEqual(19000);
+    expect(m.sendMarkdown).toHaveBeenCalled();
+    // 内容不丢：首段 + 推送余量 = 原文
+    const pushed = (m.sendMarkdown.mock.calls as any[]).map((c) => c[1].markdown.content as string).join("");
+    expect((first as string) + pushed).toBe("中".repeat(8000));
   });
 
-  it("S7：帧回复超 13 片 → 截断为 13 片 + warn 提示", async () => {
+  it("帧回复超单帧上限 → 余量转主动推送（不截断、不加截断提示）", async () => {
     const m = makeClient();
     m.replyFrameFor.mockReturnValue(FRAME);
     const logger = { warn: vi.fn(), error: vi.fn() };
     const sender = createWecomSender({ getClient: () => m.client, logger });
-    await sender.sendText("u1", "中".repeat(20000)); // 60000B → 15 片
-    expect(m.reply.mock.calls.length).toBe(13);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("截断"));
-    const last = m.reply.mock.calls[12][1].text.content as string;
-    expect(last).toContain("回答过长已截断");
-    // ★ B 修复回归：尾片也必须 ≤ 4000 字节（原实现按字符截断，中文可到约 12000B）
-    for (const call of m.reply.mock.calls) {
-      expect(Buffer.byteLength(call[1].text.content as string, "utf8")).toBeLessThanOrEqual(4000);
-    }
+    await sender.sendText("u1", "中".repeat(20000)); // 60000B
+    expect(m.replyStream).toHaveBeenCalledTimes(1);
+    expect(m.sendMarkdown).toHaveBeenCalled();
+    const pushed = (m.sendMarkdown.mock.calls as any[]).map((c) => c[1].markdown.content as string).join("");
+    const first = m.replyStream.mock.calls[0][2] as string;
+    expect(first + pushed).toBe("中".repeat(20000)); // 全文送达，无截断
+    expect(first + pushed).not.toContain("截断");
   });
 
   it("S3：欢迎语超 4000 字节 → 保持单片（replyWelcome 恰好一次）+ 字节截断 + warn", async () => {
