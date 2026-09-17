@@ -165,6 +165,10 @@ describe("createWecomSender：返工 R2/R3/S3/S7", () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("截断"));
     const last = m.reply.mock.calls[12][1].text.content as string;
     expect(last).toContain("回答过长已截断");
+    // ★ B 修复回归：尾片也必须 ≤ 4000 字节（原实现按字符截断，中文可到约 12000B）
+    for (const call of m.reply.mock.calls) {
+      expect(Buffer.byteLength(call[1].text.content as string, "utf8")).toBeLessThanOrEqual(4000);
+    }
   });
 
   it("S3：欢迎语超 4000 字节 → 保持单片（replyWelcome 恰好一次）+ 字节截断 + warn", async () => {

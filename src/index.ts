@@ -798,6 +798,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
     // ★ 企微扫码绑定流程（写独立凭据 ref WING_WECOM_BOT；凭证文件已被 .gitignore 屏蔽）
     wecom: {
       persist: async (c) => { await credStore.set("WING_WECOM_BOT", c); },
+      // ★ A 修复（D7a 接线）：此前 setup-flow 读 deps.wecom?.source 但此处从未赋值 → 配置恒为惰性
+      source: cfg.wecom.source,
       notify: (chatId) => {
         if (!chatId) return; // N5：面板触发（chatId=undefined）不产生幽灵 outbox 记录
         outbox.enqueue({

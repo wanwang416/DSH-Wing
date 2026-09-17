@@ -23,6 +23,8 @@ const h = vi.hoisted(() => {
     clients: [] as any[],
     enqueued: [] as any[],
     wecomClients: [] as any[],
+    /** ★ A 修复用例：捕获 createSetupFlow 收到的 deps（验证 cfg.wecom.source 是否接线） */
+    setupFlowDeps: null as any,
     // 行为开关（测试逐个设置）
     nextAction: "queued" as string,
     nextTextInbound: false,
@@ -253,6 +255,21 @@ vi.mock("../src/outbound/streaming-card.js", () => ({
 
 vi.mock("../src/interactive/reaction.js", () => ({
   createReactionManager: vi.fn(() => ({ react: vi.fn().mockResolvedValue(undefined) })),
+}));
+
+// ★ A 修复用例：桩掉 setup-flow，捕获 apply() 传给它的 deps（真缺口在 index.ts 是否给 source 赋值）
+vi.mock("../src/setup/setup-flow.js", () => ({
+  createSetupFlow: vi.fn((deps: any) => {
+    h.setupFlowDeps = deps;
+    return {
+      start: vi.fn(async () => undefined),
+      getActiveQr: vi.fn(() => undefined),
+      isBusy: vi.fn(() => false),
+      startWecom: vi.fn(async () => undefined),
+      getWecomQr: vi.fn(() => undefined),
+      isWecomBusy: vi.fn(() => false),
+    };
+  }),
 }));
 
 import { apply, stateDir, name, inject } from "../src/index.js";
@@ -606,6 +623,22 @@ describe("企微线路启动判定（R1/M1/S1）", () => {
     await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("企微线路未启用")));
     expect(h.wecomClients.length).toBe(0);
     await cleanup();
+  });
+});
+
+// ★ A 修复（二次验收发现）：D7a 的 source 配置必须由 index.ts 接线进 setupFlow.wecom deps，
+//   否则 setup-flow 里 deps.wecom?.source 恒为 undefined，「配置化」是惰性的（与 D1 同族：写了没人读/读了没人给）。
+describe("D7a source 接线（A 修复）", () => {
+  it("cfg.wecom.source → createSetupFlow 收到该值（缺接线时为 undefined）", () => {
+    const ctx = makeCtx();
+    apply(ctx, { wecom: { source: "my-wing" } });
+    expect(h.setupFlowDeps?.wecom?.source).toBe("my-wing");
+  });
+
+  it("未配置 source → 传 undefined，由 qr-auth 落回默认 dsh-wing", () => {
+    const ctx = makeCtx();
+    apply(ctx, {});
+    expect(h.setupFlowDeps?.wecom?.source).toBeUndefined();
   });
 });
 

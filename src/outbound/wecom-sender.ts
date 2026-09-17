@@ -114,7 +114,11 @@ export function createWecomSender(deps: WecomSenderDeps) {
       if (!frame) return this.sendMarkdown(chatId, text);
       let chunks = splitMessageByBytes(text, WECOM_TEXT_BYTE_LIMIT);
       if (chunks.length > WECOM_MAX_TEXT_CHUNKS) {
-        const tail = chunks.slice(WECOM_MAX_TEXT_CHUNKS - 1).join("").slice(0, WECOM_TEXT_BYTE_LIMIT) + "\n…（回答过长已截断）";
+        // ★ B 修复：尾片必须按字节切分（原实现用 slice 按字符截断，中文最多约 12000 字节，突破 4000 字节上限）
+        const suffix = "\n…（回答过长已截断）";
+        const budget = WECOM_TEXT_BYTE_LIMIT - utf8Length(suffix);
+        const joined = chunks.slice(WECOM_MAX_TEXT_CHUNKS - 1).join("");
+        const tail = (splitMessageByBytes(joined, budget)[0] ?? "") + suffix;
         chunks = [...chunks.slice(0, WECOM_MAX_TEXT_CHUNKS - 1), tail];
         deps.logger?.warn?.(`企微帧回复超 ${WECOM_MAX_TEXT_CHUNKS} 片已截断（chatId=${chatId}）`);
       }

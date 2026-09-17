@@ -221,6 +221,16 @@ describe("createSetupFlow：企微扫码（M2/N5）", () => {
     expect(deps.wecom!.failNotify).not.toHaveBeenCalled();
     expect(flow.isWecomBusy()).toBe(false);
   }, 15000);
+  it("★ A 修复回归：deps.wecom.source 透传给 startWecomQrLogin（D7a 接线）", async () => {
+    const deps = makeDeps({
+      wecom: { persist: vi.fn(async () => {}), notify: vi.fn(), failNotify: vi.fn(), onStatus: vi.fn(), source: "my-wing" },
+    });
+    const flow = createSetupFlow(deps);
+    await flow.startWecom(undefined);
+    const calls = (startWecomQrLogin as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.at(-1)?.[0]).toEqual({ source: "my-wing" }); // 缺接线时这里是 { source: undefined }
+    await settle(3300); // 等后台流程收尾，避免影响后续用例
+  }, 15000);
 });
 
 describe("createSetupFlow：企微 getWecomQr（M2）", () => {
