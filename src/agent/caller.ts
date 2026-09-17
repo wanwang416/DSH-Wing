@@ -18,6 +18,12 @@ export interface CreateAgentDeps {
   ctx: any;
   workspaceRoot?: string;
   agentPreset: string;
+  /**
+   * ★ 平台前缀（会话 id 命名空间）。企微会话必须传 `wecom`：
+   *   2026-09-17 真机发现 sessionKey 带平台前缀、sessionId 却落到默认 `feishu:`
+   *   （路由键与会话 id 分裂，双平台隔离只做了一半）。缺省保持 `feishu` 兼容旧行为。
+   */
+  sessionPrefix?: string;
   /** ★ 权限模式（默认保守 workspace-write） */
   permissionMode: PermissionMode;
   /** 事件回调：chatId + 归一化 session 事件 */
@@ -46,7 +52,7 @@ export interface WingAgentHandle {
   dispose(): Promise<void>;
 }
 
-/** 创建 agent（sessionId = feishu:<chatId>:<random8>:0） */
+/** 创建 agent（sessionId = <sessionPrefix>:<chatId>:<runNonce>:<generation>，缺省 feishu） */
 /** workspace attach（铁律：session 必须归属工作区，否则 DSH 无法正确管理/恢复） */
 /** 跨平台 basename：兼容 Windows 反斜杠与 POSIX 路径（Linux CI 上 node:path.basename 不识别 Windows 盘符路径） */
 function basenameAny(p: string): string {
@@ -75,7 +81,7 @@ async function attachWorkspace(ctx: any, cwd: string, sessionId: string, logger?
 
 export async function createAgent(deps: CreateAgentDeps, chatId: string): Promise<WingAgentHandle> {
   const { ctx } = deps;
-  let sessionId = makeSessionId(chatId);
+  let sessionId = makeSessionId(chatId, deps.sessionPrefix);
   const cwd = deps.workspaceRoot ?? process.cwd();
 
   // P1-2 live 模型对象（override 优先，否则派生 GUI 默认；installModelSelection 传引用 → 切模型无需重建会话）
@@ -134,7 +140,7 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
         // resume 也失败 → mint fresh（重置 runNonce，对齐）
         deps.logger?.warn?.(`session id 冲突且 resume 失败——mint fresh: ${resumeErr instanceof Error ? resumeErr.message : String(resumeErr)}`);
         resetRunNonce();
-        sessionId = makeSessionId(chatId);
+        sessionId = makeSessionId(chatId, deps.sessionPrefix);
         owned = await ctx.agents.create({
           sessionId,
           meta: { cwd, agentPreset: deps.agentPreset },

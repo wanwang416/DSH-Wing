@@ -496,8 +496,9 @@ export function apply(ctx: any, rawConfig: unknown): void {
   });
 
   // ---------- session 映射（createAgent 工厂：resume 优先，权限应用） ----------
-  const makeAgentDeps = () => ({
+  const makeAgentDeps = (sessionPrefix: string) => ({
     ctx,
+    sessionPrefix, // ★ 会话 id 平台前缀（企微必须 wecom:，否则 sessionId 落回 feishu:）
     workspaceRoot: cfg.workspaceRoot,
     agentPreset: runtime.agentPreset,
     permissionMode: runtime.permissionMode,
@@ -511,18 +512,19 @@ export function apply(ctx: any, rawConfig: unknown): void {
   mapper = createSessionMapper<WingAgentHandle>({
     async createAgent(chatId: string): Promise<WingAgentHandle> {
       // ★ 企微适配：按 chatId 判定平台前缀（企微 userid/chatid 无 oc_/ou_ 前缀，启发式）
-      const key = sessionKey(chatId, isWecomChatId(chatId) ? WECOM_SESSION_PREFIX : SESSION_PREFIX);
+      const prefix = isWecomChatId(chatId) ? WECOM_SESSION_PREFIX : SESSION_PREFIX;
+      const key = sessionKey(chatId, prefix);
       const existing = routeStore.get(key);
       if (existing?.sessionId) {
         try {
-          const handle = await resumeAgent(makeAgentDeps(), existing.sessionId);
+          const handle = await resumeAgent(makeAgentDeps(prefix), existing.sessionId);
           routeStore.upsert({ ...existing, sessionId: handle.sessionId, updatedAt: Date.now() });
           return handle;
         } catch (err) {
           logger.warn?.(`resume 失败（${existing.sessionId}），创建新 session: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      const handle = await createAgent(makeAgentDeps(), chatId);
+      const handle = await createAgent(makeAgentDeps(prefix), chatId);
       routeStore.upsert({
         sessionKey: key,
         chatId,

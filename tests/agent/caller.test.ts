@@ -266,3 +266,28 @@ describe("createAgent 其余分支", () => {
     expect(disp).toHaveBeenCalled();
   });
 });
+
+describe("sessionId 平台前缀（2026-09-17 真机缺陷修复）", () => {
+  it("企微会话：sessionPrefix='wecom' → sessionId 以 wecom: 开头（不再误落 feishu:）", async () => {
+    const { ctx, agentsCreate } = makeCtx();
+    await createAgent(makeDeps(ctx, { sessionPrefix: "wecom" }), "wr_R-JOgAA-Zmg");
+    const sessionId = agentsCreate.mock.calls[0][0].sessionId as string;
+    expect(sessionId.startsWith("wecom:wr_R-JOgAA-Zmg:")).toBe(true);
+    expect(sessionId.startsWith("feishu:")).toBe(false);
+  });
+
+  it("未传 sessionPrefix → 保持 feishu 默认（旧行为回归）", async () => {
+    const { ctx, agentsCreate } = makeCtx();
+    await createAgent(makeDeps(ctx), "oc_1");
+    const sessionId = agentsCreate.mock.calls[0][0].sessionId as string;
+    expect(sessionId.startsWith("feishu:oc_1:")).toBe(true);
+  });
+
+  it("workspace attach 用的是同一个带前缀 sessionId（路由键与会话 id 不再分裂）", async () => {
+    const { ctx, workspaceCreate } = makeCtx();
+    await createAgent(makeDeps(ctx, { sessionPrefix: "wecom", workspaceRoot: "D:\\ws" }), "wr_1");
+    const attachArg = (workspaceCreate.mock.results[0].value as Promise<{ attachSession: ReturnType<typeof vi.fn> }>);
+    const entity = await attachArg;
+    expect((entity.attachSession as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatch(/^wecom:wr_1:/);
+  });
+});
