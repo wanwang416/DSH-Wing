@@ -22,6 +22,12 @@ export interface CompensationDeps {
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
   replayWindowMs?: number;
   now?: () => number;
+  /**
+   * ★ 该路由是否属于企微线路。企微消息**不走飞书补偿**（listMessages 是飞书 API）：
+   *   2026-09-17 真机实测，拿企微 chatId 调 listMessages 会每 30 秒刷一条 429（累计 116 次）。
+   * 缺省 = 不过滤（保持旧行为）。
+   */
+  isWecomRoute?(route: { sessionKey: string; chatId: string }): boolean;
 }
 
 /** 断连补拉窗口：最近 10 分钟 */
@@ -49,6 +55,7 @@ export function createMissedCompensation(deps: CompensationDeps) {
       const since = until - windowMs;
       let pulled = 0;
       for (const route of deps.routes.all()) {
+        if (deps.isWecomRoute?.(route)) continue; // ★ 企微路由不进飞书补偿通道（真机 429 根因）
         try {
           const items = await deps.listMessages({
             chatId: route.chatId,

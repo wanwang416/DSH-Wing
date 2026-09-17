@@ -97,4 +97,18 @@ describe("createMissedCompensation（丢消息补偿）", () => {
     await c.onRecovered();
     expect(deps.logger.info).not.toHaveBeenCalledWith(expect.stringContaining("丢消息补偿"));
   });
+
+  it("★ 真机回归：企微路由被跳过，不拿企微 chatId 去调飞书 listMessages（429 根因）", async () => {
+    const deps = makeDeps() as any;
+    deps.routes.all.mockReturnValue([
+      { sessionKey: "feishu:oc_1", chatId: "oc_1", chatType: "p2p" },
+      { sessionKey: "wecom:LiangXianSheng", chatId: "LiangXianSheng", chatType: "p2p" },
+    ]);
+    deps.isWecomRoute = (r: { sessionKey: string }) => r.sessionKey.startsWith("wecom:");
+    deps.listMessages.mockResolvedValue([]);
+    const c = createMissedCompensation(deps);
+    await c.onRecovered();
+    expect(deps.listMessages).toHaveBeenCalledTimes(1);
+    expect(deps.listMessages).toHaveBeenCalledWith(expect.objectContaining({ chatId: "oc_1" }));
+  });
 });

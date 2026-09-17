@@ -68,7 +68,7 @@ export interface WecomClientLike {
 
 export interface WecomSenderDeps {
   getClient(): WecomClientLike | undefined;
-  logger?: { warn?: (m: string) => void; error?: (m: string) => void };
+  logger?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
   maxRetries?: number;
 }
 
@@ -126,6 +126,10 @@ export function createWecomSender(deps: WecomSenderDeps) {
       const frame = c.replyFrameFor(chatId);
       if (!frame) return this.sendMarkdown(chatId, text);
       const [head = "", ...rest] = splitMessageByBytes(text, WECOM_STREAM_BYTE_LIMIT);
+      // ★ 正向出站日志：成功路径原本静默（SDK debug 关闭），验收时无法拿日志说话
+      deps.logger?.info?.(
+        `企微出站：帧回复 replyStream ${utf8Length(head)}B${rest.length ? ` + 溢出转主动推送 ${utf8Length(rest.join(""))}B` : ""}`,
+      );
       await withRetry(() => c.replyStream(frame, newStreamId(), head, true));
       if (rest.length) await this.sendMarkdown(chatId, rest.join(""));
       return undefined;
@@ -136,6 +140,7 @@ export function createWecomSender(deps: WecomSenderDeps) {
       const c = client();
       if (!c) throw new Error("企微客户端未就绪");
       const chunks = splitMessageByBytes(text, WECOM_TEXT_BYTE_LIMIT);
+      deps.logger?.info?.(`企微出站：主动推送 markdown ${chunks.length} 片 / ${utf8Length(text)}B`);
       for (const chunk of chunks) {
         await withRetry(() =>
           c.sendMarkdown(chatId, { msgtype: "markdown", markdown: { content: chunk } }),
@@ -160,6 +165,7 @@ export function createWecomSender(deps: WecomSenderDeps) {
       // 首片按字节上限取，不用 slice 按字符截断（同一单位混用缺陷族）
       const head = splitMessageByBytes(firstChunk, WECOM_STREAM_BYTE_LIMIT)[0] ?? "";
       await withRetry(() => c.replyStream(frame, streamId, head, false));
+      deps.logger?.info?.(`企微出站：开启流式 ${utf8Length(head)}B`);
       activeStreams.set(chatId, streamId);
       return { chatId, streamId };
     },
@@ -179,7 +185,10 @@ export function createWecomSender(deps: WecomSenderDeps) {
         const isLast = i === chunks.length - 1;
         await withRetry(() => c.replyStream(frame, handle.streamId, chunks[i], finish && isLast)); // R3：仅末片透传 finish
       }
-      if (finish) activeStreams.delete(handle.chatId);
+      if (finish) {
+        activeStreams.delete(handle.chatId);
+        deps.logger?.info?.(`企微出站：流式收尾 ${utf8Length(content)}B`);
+      }
       return undefined;
     },
 

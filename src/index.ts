@@ -208,6 +208,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
       });
     },
     logger,
+    // ★ 企微路由不进飞书补偿通道（listMessages 是飞书 API；真机实测拿企微 chatId 调它会每 30s 刷 429）
+    isWecomRoute: (route) => route.sessionKey?.startsWith("wecom:") === true || chatPlatform(route.chatId) === "wecom",
   });
 
   // ---------- 表情 + 轮次监督 ----------

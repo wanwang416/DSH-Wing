@@ -214,3 +214,32 @@ describe("createWecomSender：返工 R2/R3/S3/S7", () => {
   });
 });
 
+describe("createWecomSender：正向出站日志（验收可用）", () => {
+  function makeSenderLogged(client: any) {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    return { sender: createWecomSender({ getClient: () => client, logger }), logger };
+  }
+
+  it("帧回复 / 主动推送 / 开启流式 / 流式收尾 四条路径都留痕", async () => {
+    const m = makeClient();
+    m.replyFrameFor.mockReturnValue(FRAME);
+    const { sender, logger } = makeSenderLogged(m.client);
+    await sender.sendText("u1", "你好");
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("帧回复 replyStream"));
+    await sender.sendMarkdown("u1", "推送");
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("主动推送 markdown"));
+    const handle = await sender.beginStream("u1", "开头");
+    await sender.stream(handle, "完整回答", true);
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("开启流式"));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("流式收尾"));
+  });
+
+  it("帧回复与溢出转推送在同一行日志里可分辨", async () => {
+    const m = makeClient();
+    m.replyFrameFor.mockReturnValue(FRAME);
+    const { sender, logger } = makeSenderLogged(m.client);
+    await sender.sendText("u1", "中".repeat(20000)); // 60000B > 19000B 单帧
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("溢出转主动推送"));
+  });
+});
+
