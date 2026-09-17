@@ -26,6 +26,14 @@ export interface ReactionsConfig {
   failed: string;
 }
 
+/** 企微智能机器人线路配置（长连接模式，扫码绑定后写 WING_WECOM_BOT 凭据） */
+export interface WecomConfig {
+  enabled: boolean;
+  botId?: string;
+  secret?: string;
+  welcomeText: string;
+}
+
 export interface WingConfig {
   /** ctx.credentials 凭据引用名 */
   credentialRef: string;
@@ -56,6 +64,8 @@ export interface WingConfig {
    * 未配置 → 审批卡不拦截任何人（单用户宽松 + 日志 warn 提示风险）。
    */
   bossOpenId?: string;
+  /** 企微智能机器人线路（长连接；enabled=false 默认不启用） */
+  wecom: WecomConfig;
 }
 
 export const DEFAULT_CONFIG: WingConfig = {
@@ -76,6 +86,12 @@ export const DEFAULT_CONFIG: WingConfig = {
   agentPreset: "code",
   // 环境变量显式置 "0" 才关闭；config.json 可覆盖（getConfig 的 ...raw 天然优先）
   interruptClassifierEnabled: process.env.DSH_WING_INTERRUPT_CLASSIFIER !== "0",
+  wecom: {
+    enabled: false,
+    botId: process.env.WECOM_BOT_ID || undefined,
+    secret: process.env.WECOM_BOT_SECRET || undefined,
+    welcomeText: "你好，我是 DSH 智能助手。直接发消息即可开始对话。",
+  },
 };
 
 /** 合并 rawConfig 与默认值（嵌套对象深合并） */
@@ -87,5 +103,6 @@ export function getConfig(ctx: unknown, rawConfig: unknown): WingConfig {
     ...raw,
     streaming: { ...DEFAULT_CONFIG.streaming, ...(raw.streaming ?? {}) },
     reactions: { ...DEFAULT_CONFIG.reactions, ...(raw.reactions ?? {}) },
+    wecom: { ...DEFAULT_CONFIG.wecom, ...(raw.wecom ?? {}) },
   };
 }

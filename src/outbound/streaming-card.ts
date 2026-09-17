@@ -167,7 +167,22 @@ export interface StreamingCardDeps {
   };
 }
 
-export class StreamingCard {
+/**
+ * 流式卡统一句柄：飞书 StreamingCard 与企微 WecomStreamCard 共同实现的接口。
+ * 体验层只依赖此接口（★ 企微适配：企微长连接一期无富卡片面板，方法语义见 WecomStreamCard）。
+ */
+export interface StreamCardHandle {
+  addThinking(delta: string): Promise<void>;
+  addText(delta: string): Promise<void>;
+  addTool(name: string, input?: string): Promise<void>;
+  setToolResult(name: string, error?: unknown): Promise<void>;
+  addContext(text?: string): Promise<void>;
+  finalize(answer: string): Promise<void>;
+  finalizeToNewCard(answer: string): Promise<boolean>;
+  readonly cardId: string;
+}
+
+export class StreamingCard implements StreamCardHandle {
   private chatId: string;
   private deps: StreamingCardDeps;
   private messageId: string | undefined;

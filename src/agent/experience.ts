@@ -11,7 +11,7 @@
  */
 
 import type { WingConfig } from "../config/defaults.js";
-import { StreamingCard } from "../outbound/streaming-card.js";
+import { StreamingCard, type StreamCardHandle } from "../outbound/streaming-card.js";
 import { classifyInterrupt, InterruptType, isForwardWord, isRedirectWord } from "../inbound/interrupt-classify.js";
 import { appendFileSync } from "node:fs";
 
@@ -24,7 +24,7 @@ export interface ExperienceDeps {
   /** 普通消息发送（卡片降级用） */
   sendText(chatId: string, text: string): Promise<void>;
   /** StreamingCard 工厂（index.ts 组装时提供 sender/onFallback） */
-  createStreamCard(chatId: string): StreamingCard;
+  createStreamCard(chatId: string): StreamCardHandle;
   addReaction(messageId: string, emoji: string): Promise<void>;
   turnSupervisor: TurnSupervisorLike;
   cfg: () => WingConfig;
@@ -34,7 +34,7 @@ export interface ExperienceDeps {
 }
 
 interface StreamState {
-  card?: StreamingCard;
+  card?: StreamCardHandle;
   hasOutput: boolean;
   /** ★ 卡片改造：最终正文候选（最后一次 assistant/message；onTurnEnd 据此发结果卡） */
   latestAnswer?: string;

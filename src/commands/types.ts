@@ -93,6 +93,8 @@ export interface BridgeCommandServices {
      * 后台扫码完成后自动写凭据 + 重启 bridge + 发完成通知（由 index.ts 组装闭包实现）。
      */
     start(chatId: string): Promise<{ url: string; expireIn: number } | undefined>;
+    /** 企微扫码绑定：启动企微智能机器人扫码流程（后台非阻塞）；有界等待 30s 返回二维码链接 */
+    startWecom?(chatId: string): Promise<{ url: string; expireIn: number } | undefined>;
   };
 }
 

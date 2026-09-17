@@ -515,6 +515,7 @@ describe("index.ts apply 集成（M4 覆盖重构）", () => {
   it("stopBridge 幂等：未启动时 cleanup 不抛错", async () => {
     const ctx = makeCtx();
     const cleanup = await startBridge(ctx);
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge started")));
     await cleanup();
     await cleanup();
     expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge stopped"));

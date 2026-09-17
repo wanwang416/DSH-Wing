@@ -10,6 +10,7 @@
  * /plugins/dsh-wing/qr route 通过 getActiveQr() 读取（配合 expireAt 判过期）。
  */
 import { toPngBuffer } from "./qrcode.js";
+import { startWecomQrLogin, pollWecomQrLogin, WECOM_POLL_INTERVAL_MS } from "./wecom-qr-auth.js";
 import { createAuthSetup, registerAppWithFetch } from "./register-app.js";
 import { buildSetupAddons } from "./addons.js";
 import type { LarkCredential } from "../host/credentials.js";
@@ -23,6 +24,8 @@ export interface SetupFlowDeps {
   notify?(chatId: string, appId: string, domain: LarkCredential["domain"]): void;
   /** 失败通知（同上，仅 chatId 有值） */
   failNotify?(chatId: string, message: string): void;
+  /** 企微扫码绑定流程的专属回调（index.ts 注入；缺省则企微流程不可用） */
+  wecom?: { persist(result: { botId: string; secret: string }): Promise<void>; notify?(chatId: string): void; failNotify?(chatId: string, message: string): void; onStatus?(message: string): void };
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
 }
 
@@ -37,12 +40,17 @@ export interface SetupFlow {
   getActiveQr(): { png: Buffer; expireAt: number } | undefined;
   /** 流程是否进行中（防重复触发） */
   isBusy(): boolean;
+  /** 启动企微扫码绑定流程（后台非阻塞；有界等待 30s 返回二维码链接） */
+  startWecom(chatId?: string): Promise<{ url: string; expireIn: number } | undefined>;
+  /** 企微扫码流程是否进行中（防重复触发） */
+  isWecomBusy(): boolean;
 }
 
 const ABORTED = "Registration was aborted";
 
 export function createSetupFlow(deps: SetupFlowDeps): SetupFlow {
   let inflight = false;
+  let wecomInflight = false; // 企微扫码流程进行中（防重）
   let epoch = 0; // 流程代数：每次 start 递增；完成/失败再递增，使挂起的 toPngBuffer 写入失效
   let activeQr: { png: Buffer; expireAt: number } | undefined;
 
@@ -108,5 +116,48 @@ export function createSetupFlow(deps: SetupFlowDeps): SetupFlow {
       }
       return qrInfo;
     },
+
+    async startWecom(chatId) {
+      if (wecomInflight) return undefined; // 防重
+      wecomInflight = true;
+      let info: { url: string; expireIn: number } | undefined;
+      void (async () => {
+        try {
+          const start = await startWecomQrLogin({});
+          deps.wecom?.onStatus?.(`企微二维码已生成，请在 ${Math.round((start.expiresAt - Date.now()) / 1000)} 秒内扫码`);
+          info = { url: start.verificationUrl, expireIn: Math.round((start.expiresAt - Date.now()) / 1000) };
+          const deadline = start.expiresAt;
+          for (;;) {
+            if (Date.now() > deadline) {
+              deps.wecom?.failNotify?.(chatId ?? "", "二维码已过期，请重新发起 /setup wecom。");
+              break;
+            }
+            await new Promise((r) => setTimeout(r, WECOM_POLL_INTERVAL_MS));
+            const res = await pollWecomQrLogin({ sessionKey: start.sessionKey });
+            if (res.connected) {
+              await deps.wecom?.persist({ botId: res.botId, secret: res.secret });
+              await deps.restart();
+              deps.wecom?.notify?.(chatId ?? "");
+              break;
+            }
+            if (res.status === "waiting") continue;
+            deps.wecom?.failNotify?.(chatId ?? "", res.message);
+            break;
+          }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          deps.wecom?.failNotify?.(chatId ?? "", `企微扫码绑定失败：${message}`);
+        } finally {
+          wecomInflight = false;
+        }
+      })();
+      // 有界等待二维码就绪（generate 请求一般 <2s）
+      const deadline = Date.now() + 30_000;
+      while (!info && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      return info;
+    },
+    isWecomBusy: () => wecomInflight,
   };
 }

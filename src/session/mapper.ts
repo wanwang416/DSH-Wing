@@ -9,6 +9,8 @@
 import { randomBytes } from "node:crypto";
 
 export const SESSION_PREFIX = "feishu";
+/** 企微线路会话前缀（双平台隔离：feishu:<chatId> / wecom:<chatId>） */
+export const WECOM_SESSION_PREFIX = "wecom";
 
 /**
  * ★ session id 生成：进程级 runNonce + per-chat generation 计数
@@ -24,14 +26,14 @@ let runNonce = randomBytes(6).toString("hex");
 /** chatId → generation（dispose 后重建递增） */
 const generations = new Map<string, number>();
 
-/** chatId → DSH session key（路由/会话标识） */
-export function sessionKey(chatId: string): string {
-  return `${SESSION_PREFIX}:${chatId}`;
+/** chatId → DSH session key（路由/会话标识）。prefix 隔离平台（默认 feishu，企微传 WECOM_SESSION_PREFIX） */
+export function sessionKey(chatId: string, prefix: string = SESSION_PREFIX): string {
+  return `${prefix}:${chatId}`;
 }
 
 /** 生成 DSH session id：feishu:<chatId>:<runNonce>:<generation>（稳定，对齐 session 命名键） */
-export function makeSessionId(chatId: string): string {
-  return `${sessionKey(chatId)}:${runNonce}:${generations.get(chatId) ?? 0}`;
+export function makeSessionId(chatId: string, prefix: string = SESSION_PREFIX): string {
+  return `${sessionKey(chatId, prefix)}:${runNonce}:${generations.get(chatId) ?? 0}`;
 }
 
 /** 同一 chat 的新一轮会话（dispose 后重建时调用） */

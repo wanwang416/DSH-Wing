@@ -27,7 +27,12 @@ export function shouldProcessGroupMessage(msg: ParsedMessage, deps: GroupPolicyD
     case "open":
       return true;
     case "mention": {
-      const mentioned = msg.mentions.includes(botOpenId ?? "") || (botOpenId ? msg.rawText.includes(`@${botOpenId}`) : false);
+      // ★ 企微适配：企微无 bot open_id（@ 表现为文本 "@机器人名"）；P1-3 意图桥设计意图
+      //   「@ 了任何人 = 点名，不过滤（保守防误吞）」，故 @ 任何成员即命中
+      const mentioned =
+        msg.mentions.includes(botOpenId ?? "") ||
+        (botOpenId ? msg.rawText.includes(`@${botOpenId}`) : false) ||
+        msg.mentions.length > 0;
       return mentioned;
     }
     case "keywords": {

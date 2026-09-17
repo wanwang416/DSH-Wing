@@ -42,5 +42,22 @@ export function createDispatcher(deps: DispatcherDeps) {
         deps.logger?.error?.(`handleInbound 失败: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
+
+    /**
+     * ★ 企微线路入口：消息已在平台侧解析成 ParsedMessage（wecom-parser），
+     * 跳过飞书事件解析，直接去重 + 进 handleInbound。
+     */
+    async handleParsed(msg: ParsedMessage): Promise<void> {
+      if (deps.dedupe.isDuplicate(msg.messageId)) {
+        deps.logger?.warn?.(`去重丢弃企微消息 ${msg.messageId}`);
+        return;
+      }
+      if (!deps.dedupe.add(msg.messageId)) return;
+      try {
+        await deps.handleInbound(msg);
+      } catch (err) {
+        deps.logger?.error?.(`企微 handleInbound 失败: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
   };
 }

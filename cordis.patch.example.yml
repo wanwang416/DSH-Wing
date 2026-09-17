@@ -16,3 +16,12 @@
         streaming:
           enabled: true          # 默认开流式
         permissionMode: workspace-write  # 默认保守（read-only / workspace-write / danger-full-access）
+        # ── 企微智能机器人线路（长连接模式，可选）──────────────────────────
+        # 方式 A（推荐）：/setup wecom 扫码创建/绑定 → 自动写入 WING_WECOM_BOT 凭据，无需在此配置
+        # 方式 B（兜底）：手填 BotID/Secret（来自企微后台「管理工具→智能机器人→API 模式」），
+        #   或用环境变量 WECOM_BOT_ID / WECOM_BOT_SECRET（等价，代码默认读取）
+        wecom:
+          enabled: true          # 设为 true 才会建连（需 botId+secret 同时就绪）
+          # botId: "ww1234567890abcdef"   # 方式 B 手填时取消注释
+          # secret: "your-bot-secret"     # 方式 B 手填时取消注释
+          welcomeText: "你好，我是 DSH 智能助手。直接发消息即可开始对话。"

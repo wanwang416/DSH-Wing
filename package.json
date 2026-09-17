@@ -85,6 +85,7 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.73.0",
+    "@wecom/aibot-node-sdk": "^1.0.7",
     "jszip": "^3.10.1",
     "qrcode": "^1.5.4"
   },

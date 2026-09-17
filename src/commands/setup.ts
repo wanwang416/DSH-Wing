@@ -11,9 +11,10 @@ import { toAsciiQr, qrHint } from "../setup/qrcode.js";
 
 export const setupCommand: BridgeCommandDef = {
   name: "setup",
-  description: "扫码一键创建飞书机器人并自动配置：/setup（30 秒上线）",
+  description: "扫码一键创建飞书机器人并自动配置：/setup；企微智能机器人：/setup wecom",
   async run(deps, rawInput, msg) {
-    const start = deps.services?.setup?.start;
+    const isWecom = rawInput.trim().toLowerCase() === "wecom";
+    const start = isWecom ? deps.services?.setup?.startWecom : deps.services?.setup?.start;
     if (!start) return { text: "⚠️ setup 服务不可用，请稍后再试" };
 
     // 阻塞等待二维码就绪（最多 30s）；期间后台正在访问飞书发起注册
@@ -26,9 +27,9 @@ export const setupCommand: BridgeCommandDef = {
 
     const qr = await toAsciiQr(info.url);
     const lines: string[] = [
-      "📱 **扫码创建飞书机器人（换 bot 辅助）**",
+      isWecom ? "📱 **扫码绑定企业微信智能机器人**" : "📱 **扫码创建飞书机器人（换 bot 辅助）**",
       "",
-      "用**手机飞书**扫码授权，或复制链接到浏览器打开：",
+      isWecom ? "用**企业微信**扫码授权（自动创建并绑定智能机器人），或复制链接到浏览器打开：" : "用**手机飞书**扫码授权，或复制链接到浏览器打开：",
       "",
       `🔗 ${info.url}`,
       "",
@@ -41,8 +42,8 @@ export const setupCommand: BridgeCommandDef = {
       "",
       qrHint(info.expireIn),
       "",
-      "扫码确认后，bot 自动：",
-      "- 创建应用 + 配置权限与事件订阅",
+      isWecom ? "扫码确认后，自动完成：" : "扫码确认后，bot 自动：",
+      isWecom ? "- 创建并绑定智能机器人（BotID/Secret 自动写入 WING_WECOM_BOT）" : "- 创建应用 + 配置权限与事件订阅",
       "- 写入凭据 + 重启连接",
       "- 完成后通知你",
     );

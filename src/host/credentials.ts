@@ -30,7 +30,8 @@ export function createCredentialStore(ctx: any) {
       }
       return raw as LarkCredential;
     },
-    async set(ref: string, value: LarkCredential): Promise<void> {
+    // ★ 企微适配：value 放宽为 unknown（WING_WECOM_BOT 存 {botId, secret}，非 LarkCredential）
+    async set(ref: string, value: unknown): Promise<void> {
       await ctx.credentials?.set?.(ref, JSON.stringify(value));
     },
     async unset(ref: string): Promise<void> {

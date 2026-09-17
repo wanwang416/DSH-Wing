@@ -17,6 +17,8 @@ export interface ParsedMessage {
   rawText: string;
   mentions: string[];
   /** 回复消息的父消息 id（reply 群策略用） */
+  /** 来源平台（默认飞书；企微线路由 wecom-parser 标记，用于 session/outbox 双路由隔离） */
+  platform?: "feishu" | "wecom";
   parentId?: string;
   timestamp: number;
 }

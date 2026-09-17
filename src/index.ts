@@ -19,6 +19,7 @@ import { getConfig, type WingConfig } from "./config/defaults.js";
 import { createCredentialStore } from "./host/credentials.js";
 import { buildLarkClient, type WingLarkClient } from "./host/client.js";
 import { createTransport } from "./host/websocket.js";
+import { createWecomClient, type WecomClient } from "./host/wecom-client.js";
 import { createStatusStore } from "./host/status.js";
 import { createQuotaGovernor } from "./host/quota.js";
 import { createConnectionSupervisor } from "./host/supervisor.js";
@@ -27,11 +28,12 @@ import { createMissedCompensation } from "./inbound/compensation.js";
 import { createBatching } from "./inbound/batching.js";
 import { createGroupPolicy } from "./inbound/group-policy.js";
 import { parseInboundMessage, type ParsedMessage } from "./inbound/parser.js";
+import { parseWecomInbound, isWecomChatId } from "./inbound/wecom-parser.js";
 import { chatTypeOf } from "./inbound/chat-type.js";
 import { createDedupeStore } from "./inbound/dedup.js";
 import { createDispatcher } from "./inbound/dispatcher.js";
 import { createEventHandler } from "./inbound/event-handler.js";
-import { sessionKey, createSessionMapper, resetRunNonce, resetGeneration } from "./session/mapper.js";
+import { sessionKey, SESSION_PREFIX, WECOM_SESSION_PREFIX, createSessionMapper, resetRunNonce, resetGeneration } from "./session/mapper.js";
 import { createRouteStore } from "./session/persistence.js";
 import { createSerialQueue } from "./session/serial.js";
 import { createAgent, resumeAgent, type WingAgentHandle } from "./agent/caller.js";
@@ -66,6 +68,8 @@ import type { ApprovalOutcome, ApprovalRequest } from "@deepseek-ai/dsh-user-app
 import type { SelectorItem } from "./interactive/selector.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
 import { createSender } from "./outbound/sender.js";
+import { createWecomSender } from "./outbound/wecom-sender.js";
+import { WecomStreamCard } from "./outbound/wecom-stream-card.js";
 import { createOutbox } from "./outbound/outbox.js";
 import { StreamingCard } from "./outbound/streaming-card.js";
 import { createReactionManager } from "./interactive/reaction.js";
@@ -120,9 +124,29 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const credStore = createCredentialStore(ctx);
   let larkClient: WingLarkClient | undefined;
   const getLarkClient = () => larkClient;
+  // 企微智能机器人线路（长连接；startBridge 内按 cfg.wecom 创建）
+  let wecomClient: WecomClient | undefined;
+  const getWecomClient = () => wecomClient;
 
   // ---------- 出站（sender + outbox） ----------
   const sender = createSender({ getClient: getLarkClient, logger });
+  // 企微出站（依赖 wecomClient 延迟就绪；无回调帧时自动降级主动推送）
+  const wecomSender = createWecomSender({ getClient: getWecomClient, logger });
+  /** card JSON → 企微降级纯文本（企微一期无模板卡片，取 main_text / 全部文本元素） */
+  const cardToWecomText = (card: unknown): string => {
+    try {
+      const json = typeof card === "string" ? JSON.parse(card) : (card as any);
+      const elements = json?.body?.elements ?? [];
+      const texts: string[] = [];
+      for (const el of elements) {
+        if (el?.tag === "markdown" && typeof el.content === "string") texts.push(el.content);
+        else if (el?.tag === "div" && typeof el?.text?.content === "string") texts.push(el.text.content);
+      }
+      return texts.filter(Boolean).join("\n") || (typeof card === "string" ? card.slice(0, 2000) : JSON.stringify(card).slice(0, 2000));
+    } catch {
+      return typeof card === "string" ? card.slice(0, 2000) : String(card).slice(0, 2000);
+    }
+  };
   // ---------- M3 任务 1：ask-user-question 飞书桥（monkey-patch ctx.userQuestions.ask，飞书优先） ----------
   const userQuestionBridge = createUserQuestionBridge({
     sendCard: (chatId, card) => sender.sendCard(chatId, card),
@@ -139,6 +163,15 @@ export function apply(ctx: any, rawConfig: unknown): void {
     dir: join(dir, "outbox"),
     deliver: async (env) => {
       try {
+        if (isWecomChatId(env.chatId)) {
+          // ★ 企微线路：无模板卡片/表情 API → card 降级纯文本，reaction 忽略
+          if (env.kind === "text") {
+            await wecomSender.sendText(env.chatId, env.payload.text ?? "");
+          } else if (env.kind === "card") {
+            await wecomSender.sendText(env.chatId, cardToWecomText(env.payload.card));
+          }
+          return { ok: true };
+        }
         if (env.kind === "text") {
           await sender.sendText(env.chatId, env.payload.text ?? "");
         } else if (env.kind === "card") {
@@ -203,8 +236,22 @@ export function apply(ctx: any, rawConfig: unknown): void {
         payload: { kind: "text", text },
       }) as unknown as Promise<void>,
     // ★ StreamingCard 工厂：单卡流式（思考/工具/回答聚合一张卡），降级回退 outbox text
-    createStreamCard: (chatId) =>
-      new StreamingCard(chatId, {
+    createStreamCard: (chatId) => {
+      // ★ 企微线路：流式走 replyStream（无卡片/打字机），接口与 StreamingCard 对齐
+      if (isWecomChatId(chatId)) {
+        return new WecomStreamCard(chatId, {
+          sender: wecomSender,
+          logger,
+          onFallback: (cid, text) =>
+            outbox.enqueue({
+              dedupeKey: `${cid}:wecom-fallback:${text.length}:${Date.now()}`,
+              chatId: cid,
+              kind: "text",
+              payload: { kind: "text", text },
+            }) as unknown as Promise<void>,
+        });
+      }
+      return new StreamingCard(chatId, {
         sender,
         logger,
         // ★ M3 任务 2：CardKit 流式打字机（两步创建 + PUT 流式）
@@ -219,7 +266,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
             kind: "text",
             payload: { kind: "text", text },
           }) as unknown as Promise<void>,
-      }),
+      });
+    },
     addReaction: (messageId, emoji) =>
       reactionManager.react(messageId, emoji) as unknown as Promise<void>,
     turnSupervisor,
@@ -271,7 +319,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     await mapper?.disposeAgentFor(chatId); // dispose 旧 agent（内部 gen+1，随即归零）
     resetRunNonce(); // mint fresh runNonce（换新家族，不撞旧日志）
     resetGeneration(chatId); // gen 归零（对齐 rotate 语义）
-    routeStore.remove(sessionKey(chatId)); // 移除旧路由账目 → 下次 createAgent 全新创建
+    routeStore.remove(sessionKey(chatId, isWecomChatId(chatId) ? WECOM_SESSION_PREFIX : SESSION_PREFIX)); // 移除旧路由账目 → 下次 createAgent 全新创建
   };
 
   // 单选卡回调路由（依赖 runtime/modelRegistry/rotateSession/reply，须在 event-handler 之前创建）
@@ -361,6 +409,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
       | { kind: "dsh"; name: string; rawInput: string; line: string; agent: unknown },
     msg: ParsedMessage,
   ): Promise<void> {
+    const platformPrefix = msg.platform === "wecom" ? WECOM_SESSION_PREFIX : SESSION_PREFIX;
     const cmdName = routed.kind === "bridge" ? routed.command.name : routed.name;
     let reply: string | undefined;
     let replyCard: Record<string, unknown> | undefined;
@@ -391,7 +440,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     });
     status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
     experience.onInbound(msg.chatId, msg.messageId);
-    const key = sessionKey(msg.chatId);
+    const key = sessionKey(msg.chatId, platformPrefix);
     const route = routeStore.get(key);
     if (route) routeStore.touch(key, msg.messageId);
     else {
@@ -458,7 +507,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
   mapper = createSessionMapper<WingAgentHandle>({
     async createAgent(chatId: string): Promise<WingAgentHandle> {
-      const key = sessionKey(chatId);
+      // ★ 企微适配：按 chatId 判定平台前缀（企微 userid/chatid 无 oc_/ou_ 前缀，启发式）
+      const key = sessionKey(chatId, isWecomChatId(chatId) ? WECOM_SESSION_PREFIX : SESSION_PREFIX);
       const existing = routeStore.get(key);
       if (existing?.sessionId) {
         try {
@@ -496,6 +546,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
     botOpenId: () => transport.botOpenId(),
     logger,
     async handleInbound(msg: ParsedMessage) {
+      // ★ 企微适配：会话 key 按平台隔离（feishu:/wecom:），避免 chatId 撞车
+      const platformPrefix = msg.platform === "wecom" ? WECOM_SESSION_PREFIX : SESSION_PREFIX;
       // ★ P1-3 意图桥：群聊纯寒暄不触发 agent（未明确 @bot → 打 reaction + 消费 WAL，不建 session）
       // p2p 永远不过滤（用户单独找 bot 必须有响应）；@bot 命中 = 用户明确点名，也不过滤
       if (msg.chatType === "group") {
@@ -566,7 +618,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
         });
         status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
         experience.onInbound(msg.chatId, msg.messageId);
-        const key = sessionKey(msg.chatId);
+        const key = sessionKey(msg.chatId, platformPrefix);
         const route = routeStore.get(key);
         if (route) routeStore.touch(key, msg.messageId);
         else {
@@ -598,7 +650,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
         });
         status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
         experience.onInbound(msg.chatId, msg.messageId);
-        const key = sessionKey(msg.chatId);
+        const key = sessionKey(msg.chatId, platformPrefix);
         const route = routeStore.get(key);
         if (route) routeStore.touch(key, msg.messageId);
         else {
@@ -741,6 +793,30 @@ export function apply(ctx: any, rawConfig: unknown): void {
   // M4.2 /setup 核心流程（飞书 /setup 与 Web 面板共用；restart 闭包引用后文定义的 stop/startBridge）
   const setupFlow = createSetupFlow({
     persist: async (c) => { await credStore.set(cfg.credentialRef, c); },
+    // ★ 企微扫码绑定流程（写独立凭据 ref WING_WECOM_BOT；凭证文件已被 .gitignore 屏蔽）
+    wecom: {
+      persist: async (c) => { await credStore.set("WING_WECOM_BOT", c); },
+      notify: (chatId) => {
+        outbox.enqueue({
+          dedupeKey: `wecom-setup:done:${chatId}`,
+          chatId,
+          kind: "text",
+          payload: {
+            kind: "text",
+            text: "✅ **企微智能机器人已绑定并重启连接！**\n\n在企业微信里私聊机器人即可对话（群聊需 @ 机器人）。",
+          },
+        });
+      },
+      failNotify: (chatId, message) => {
+        outbox.enqueue({
+          dedupeKey: `wecom-setup:fail:${chatId}:${Date.now()}`,
+          chatId,
+          kind: "text",
+          payload: { kind: "text", text: `❌ 企微扫码绑定失败：${message}` },
+        });
+      },
+      onStatus: (m) => logger.info?.(`wecom setup: ${m}`),
+    },
     restart: async () => { await stopBridge(); await startBridge(); },
     notify: (chatId, appId, domain) => {
       outbox.enqueue({
@@ -888,6 +964,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     // M4.2 /setup 扫码建应用（核心流程由 setupFlow 承担：后台注册 → 扫码 → 写凭据 → 重启桥 → 完成通知）
     setup: {
       start: (chatId) => setupFlow.start(chatId),
+      startWecom: (chatId) => setupFlow.startWecom(chatId),
     },
   };
   bridgeCommands.set("stop", stopCommand);
@@ -904,6 +981,35 @@ export function apply(ctx: any, rawConfig: unknown): void {
   bridgeCommands.set("steer", steerCommand);
   bridgeCommands.set("setup", setupCommand);
   bridgeCommands.set("doctor", doctorCommand);
+
+  /** 企微智能机器人线路启动（长连接；可选，未配置/缺凭据不阻塞飞书主线路） */
+  const startWecomBridge = async (): Promise<void> => {
+    const wc = cfg.wecom;
+    if (!wc?.enabled) { logger.info?.("企微线路未启用（wecom.enabled=false）"); return; }
+    if (!wc.botId || !wc.secret) {
+      logger.warn?.("企微线路 enabled 但缺少 botId/secret：可用 /setup wecom 扫码绑定，或配置 WECOM_BOT_ID / WECOM_BOT_SECRET");
+      return;
+    }
+    const client = createWecomClient({ botId: wc.botId, secret: wc.secret, logger });
+    client.onMessage((frame) => {
+      const msg = parseWecomInbound(frame.body as any);
+      if (!msg) return;
+      void dispatcher.handleParsed(msg).catch((err) =>
+        logger.error?.(`企微消息处理失败: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    });
+    client.onEvent((frame) => {
+      const body = frame.body as { event?: { eventtype?: string }; from?: { userid?: string }; chatid?: string } | undefined;
+      if (body?.event?.eventtype === "enter_chat" && body.from?.userid) {
+        const chatId = body.chatid ?? body.from.userid;
+        void client.replyWelcome(frame, { msgtype: "text", text: { content: wc.welcomeText } }).catch(() => void 0);
+      }
+    });
+    client.onConnState((connected) => logger.info?.(`企微连接 ${connected ? "已认证" : "断开/重连中"}`));
+    wecomClient = client;
+    await client.start();
+    logger.info?.("企微线路已启动（长连接模式）");
+  };
 
   const startBridge = async (): Promise<void> => {
     if (lifecycleStarted) return;
@@ -953,6 +1059,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
       await supervisor.start();
       // P1-2 模型 GUI 同步（10s 轮询 currentSelection，GUI 切模型 → 桥跟随无 override 会话）
       modelSync.start();
+      // 7) 企微智能机器人线路（长连接；可选，未配置不阻塞飞书）
+      await startWecomBridge();
       lifecycleStarted = true;
       startBlocker = undefined;
       logger.info?.("bridge started (M2 + P1-2 model sync)");
@@ -966,6 +1074,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
     if (!lifecycleStarted) return;
     modelSync.stop();
     turnSupervisor.stop();
+    if (wecomClient) {
+      await wecomClient.stop().catch(() => void 0);
+      wecomClient = undefined;
+    }
     await supervisor.stop(); // 内部先 transport.stop（CLOSE frame）
     await outbox.stop();
     // ★ M4 终审风险2：桥停止前 abort 所有 pending，避免残留 Promise 悬挂
