@@ -9,12 +9,15 @@ import {
   ASK_ABORTED,
 } from "../../src/agent/user-questions.js";
 
-function makeBridge(opts: { timeoutMs?: number } = {}) {
+function makeBridge(
+  opts: { timeoutMs?: number; platformOf?: (chatId: string) => "feishu" | "wecom" | undefined } = {},
+) {
   const sendCard = vi.fn().mockResolvedValue({ data: { message_id: "om_1" } });
   const updateCard = vi.fn().mockResolvedValue({});
   const sendText = vi.fn().mockResolvedValue({});
   const logger = { warn: vi.fn(), info: vi.fn() };
   const bridge = createUserQuestionBridge({
+    ...(opts.platformOf ? { platformOf: opts.platformOf } : {}),
     sendCard,
     updateCard,
     sendText,
@@ -252,5 +255,57 @@ describe("降级文本构建", () => {
     expect(t).toContain("❓ 选？");
     expect(t).toContain("1. A");
     expect(t).toContain("请回复数字");
+  });
+});
+
+// ★ 2026-10-01 企微线路：提问不再发飞书卡片（旧逻辑按 sessionId 前缀判定 → 企微路由
+//   的 sessionId 也带 feishu: 前缀 → 卡片发去飞书 API → 400 invalid open_id，真机坐实）
+describe("企微线路提问（platformOf = wecom）", () => {
+  const wecom = () => "wecom" as const;
+
+  it("直接发编号文本，不调用 sendCard", async () => {
+    const { bridge, sendCard, sendText, logger } = makeBridge({ platformOf: wecom });
+    const ctx = makeCtx();
+    bridge.patchAsk(ctx);
+    void (ctx.userQuestions as any).ask({
+      // 真实形态：企微路由的 sessionId 也带 feishu: 前缀（chatId = LiangXianSheng）
+      agent: { id: "feishu:LiangXianSheng:15ed37f97d98:0" },
+      questions: [{ id: "q1", question: "今天先干 A 还是 B？", options: [{ label: "A" }, { label: "B" }] }],
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sendCard).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("1. A"));
+    expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("请回复数字"));
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("企微文本模式"));
+  });
+
+  it("用户回「1」→ 解析成选项并回执（不调 updateCard）", async () => {
+    const { bridge, updateCard, sendText } = makeBridge({ platformOf: wecom });
+    const ctx = makeCtx();
+    bridge.patchAsk(ctx);
+    const p = (ctx.userQuestions as any).ask({
+      agent: { id: "feishu:LiangXianSheng:15ed37f97d98:0" },
+      questions: [{ id: "q1", question: "选？", options: [{ label: "A" }, { label: "B" }] }],
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bridge.onTextInbound("LiangXianSheng", "1")).toBe(true);
+    await expect(p).resolves.toEqual({ answers: [{ id: "q1", selected: ["A"] }] });
+    expect(updateCard).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("✅ 已记录：A"));
+  });
+
+  it("平台未知（缺省）→ 保持飞书卡片行为不变（防回归）", async () => {
+    const { bridge, sendCard, sendText } = makeBridge();
+    const ctx = makeCtx();
+    bridge.patchAsk(ctx);
+    const p = (ctx.userQuestions as any).ask({
+      agent: { id: "feishu:oc_1:123:0" },
+      questions: [{ id: "q1", question: "选？", options: [{ label: "A" }] }],
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sendCard).toHaveBeenCalledTimes(1);
+    expect(sendText).not.toHaveBeenCalled();
+    bridge.onCardAction("oc_1", "answer:q1:0");
+    await expect(p).resolves.toEqual({ answers: [{ id: "q1", selected: ["A"] }] });
   });
 });

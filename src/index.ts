@@ -145,11 +145,22 @@ export function apply(ctx: any, rawConfig: unknown): void {
       return typeof card === "string" ? card.slice(0, 2000) : String(card).slice(0, 2000);
     }
   };
-  // ---------- M3 任务 1：ask-user-question 飞书桥（monkey-patch ctx.userQuestions.ask，飞书优先） ----------
+  // ---------- M3 任务 1：ask-user-question 桥（monkey-patch ctx.userQuestions.ask） ----------
+  // ★ 2026-10-01 企微线路修复：提问不再一律走飞书卡片。
+  //   企微没有模板卡片 API，且企微路由的 sessionId 同样带 feishu: 前缀，
+  //   旧逻辑按前缀判定 → 卡片发去飞书 API → 400 invalid open_id（真机坐实，降级文本也 400）。
+  //   判定顺序与 outbox.deliver 完全一致：入站登记的平台表优先，启发式兜底。
+  const questionPlatformOf = (chatId: string): "feishu" | "wecom" | undefined =>
+    chatPlatform(chatId) ?? (isWecomChatId(chatId) ? "wecom" : undefined);
   const userQuestionBridge = createUserQuestionBridge({
-    sendCard: (chatId, card) => sender.sendCard(chatId, card),
+    platformOf: questionPlatformOf,
+    sendCard: (chatId, card) =>
+      questionPlatformOf(chatId) === "wecom"
+        ? wecomSender.sendText(chatId, cardToWecomText(card))
+        : sender.sendCard(chatId, card),
     updateCard: (messageId, cardJson) => sender.updateCard(messageId, cardJson),
-    sendText: (chatId, text) => sender.sendText(chatId, text),
+    sendText: (chatId, text) =>
+      questionPlatformOf(chatId) === "wecom" ? wecomSender.sendText(chatId, text) : sender.sendText(chatId, text),
     messageIdOf: messageIdOfRes,
     logger,
     // ★ R5.1 根因修复：此前未传 timeoutMs → 内部默认 30s，用户稍晚点击按钮时 pending 已静默过期

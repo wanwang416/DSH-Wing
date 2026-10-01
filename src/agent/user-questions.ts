@@ -35,6 +35,13 @@ export interface UserQuestionBridgeDeps {
   sendText(chatId: string, text: string): Promise<unknown>;
   /** 从 sendCard 响应提取 message_id */
   messageIdOf(res: unknown): string | undefined;
+  /**
+   * ★ 2026-10-01 企微线路：判定该 chat 走哪条通道。
+   *   "wecom" → 企微没有模板卡片 API，直接发「编号选项」纯文本
+   *   （sendText 由 index.ts 分流到 wecomSender；答案解析复用 onTextInbound）
+   *   其余（含 undefined）→ 保持原飞书卡片行为，一字不变
+   */
+  platformOf?(chatId: string): "feishu" | "wecom" | undefined;
   /** 提问超时（默认 30_000ms） */
   timeoutMs?: number;
   logger?: { warn?: (m: string) => void; info?: (m: string) => void };
@@ -263,6 +270,23 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
   }
 
   async function trySendCard(chatId: string, entry: PendingEntry): Promise<void> {
+    // ★ 2026-10-01 企微线路（修复「提问卡片发去飞书必然 400」）：
+    //   企微没有模板卡片 API，且企微路由的 sessionId 也带 feishu: 前缀，
+    //   靠前缀判定会把卡片发去飞书 API → 400 invalid open_id（真机 2026-10-01 坐实）。
+    //   这里按线路判定：企微直接发编号文本，不尝试卡片、不占用 cardMessageId。
+    if (deps.platformOf?.(chatId) === "wecom") {
+      entry.mode = "text";
+      try {
+        await deps.sendText(chatId, buildQuestionText(entry.question));
+        entry.timer = setTimeout(() => timeout(chatId, entry), timeoutMs);
+        deps.logger?.info?.(`提问已发送（企微文本模式）chat=${chatId} q=${entry.question.id}`);
+      } catch (err) {
+        deps.logger?.warn?.(
+          `企微提问文本发送失败（将超时兜底）: chat=${chatId} ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      return;
+    }
     try {
       const res = await deps.sendCard(chatId, buildQuestionCard(entry.question));
       entry.cardMessageId = deps.messageIdOf(res);
@@ -415,6 +439,9 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
         if (!resolveEntry(chatId, entry, [], trimmed)) return true;
         if (entry.cardMessageId) {
           deps.updateCard(entry.cardMessageId, JSON.stringify(buildAnsweredCard(entry.question, trimmed))).catch(() => void 0);
+        } else {
+          // ★ 2026-10-01：文本模式（企微 / 降级）没有卡片可改 → 补一条已记录回执
+          deps.sendText(chatId, `✅ 已记录：${trimmed}`).catch(() => void 0);
         }
         deps.logger?.info?.(`提问自由文本回答 chat=${chatId} q=${entry.question.id} → ${trimmed.slice(0, 50)}`);
         return true;
@@ -430,6 +457,9 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
       const shown = ans.custom ?? ans.selected.join(", ");
       if (entry.cardMessageId) {
         deps.updateCard(entry.cardMessageId, JSON.stringify(buildAnsweredCard(entry.question, shown))).catch(() => void 0);
+      } else {
+        // ★ 2026-10-01：文本模式（企微 / 降级）没有卡片可改 → 补一条已记录回执
+        deps.sendText(chatId, `✅ 已记录：${shown}`).catch(() => void 0);
       }
       deps.logger?.info?.(`提问文本回答 chat=${chatId} q=${entry.question.id} → ${shown}`);
       return true;

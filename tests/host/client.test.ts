@@ -14,7 +14,7 @@ const h = vi.hoisted(() => ({
 vi.mock("@larksuiteoapi/node-sdk", () => ({
   Domain: { Feishu: "DOMAIN_FEISHU", Lark: "DOMAIN_LARK" },
   AppType: { SelfBuild: "APP_SELF" },
-  LoggerLevel: { debug: "DEBUG", error: "ERROR" },
+  LoggerLevel: { trace: "TRACE", debug: "DEBUG", info: "INFO", warn: "WARN", error: "ERROR" },
   Client: vi.fn(function (this: any, opts: any) {
     const self: any = {
       opts,
@@ -226,20 +226,55 @@ describe("buildLarkClient", () => {
     expect(client.connectionStatus!()).toBe("connected");
   });
 
-  it("DSH_WING_SDK_LOG 设置 → loggerLevel debug 且 logger 提供", async () => {
+  it("DSH_WING_SDK_LOG 设置 → loggerLevel 默认 warn 且 logger 提供（★ 2026-10-01 轮转修复后的新行为）", async () => {
     const logFile = tmpFile();
     const old = process.env.DSH_WING_SDK_LOG;
+    const oldLevel = process.env.DSH_WING_SDK_LOG_LEVEL;
     process.env.DSH_WING_SDK_LOG = logFile;
+    delete process.env.DSH_WING_SDK_LOG_LEVEL;
     try {
       buildLarkClient({ appId: "a", appSecret: "s" });
-      expect(lastClient().opts.loggerLevel).toBe("DEBUG");
+      // ★ 2026-10-01：级别不再是"设了就 debug"——默认 warn，避免 SDK 侧 debug 洪流（实测写满 180.7 MB）
+      expect(lastClient().opts.loggerLevel).toBe("WARN");
       expect(lastClient().opts.logger).toBeTruthy();
       // SDK logger 写文件不崩溃
       lastClient().opts.logger.info("hello");
     } finally {
       if (old === undefined) delete process.env.DSH_WING_SDK_LOG;
       else process.env.DSH_WING_SDK_LOG = old;
+      if (oldLevel === undefined) delete process.env.DSH_WING_SDK_LOG_LEVEL;
+      else process.env.DSH_WING_SDK_LOG_LEVEL = oldLevel;
       rmSync(join(logFile, ".."), { recursive: true, force: true });
+    }
+  });
+
+  it("DSH_WING_SDK_LOG_LEVEL=debug → loggerLevel DEBUG（显式要详细日志时才开）", () => {
+    const logFile = tmpFile();
+    const old = process.env.DSH_WING_SDK_LOG;
+    const oldLevel = process.env.DSH_WING_SDK_LOG_LEVEL;
+    process.env.DSH_WING_SDK_LOG = logFile;
+    process.env.DSH_WING_SDK_LOG_LEVEL = "debug";
+    try {
+      buildLarkClient({ appId: "a", appSecret: "s" });
+      expect(lastClient().opts.loggerLevel).toBe("DEBUG");
+    } finally {
+      if (old === undefined) delete process.env.DSH_WING_SDK_LOG;
+      else process.env.DSH_WING_SDK_LOG = old;
+      if (oldLevel === undefined) delete process.env.DSH_WING_SDK_LOG_LEVEL;
+      else process.env.DSH_WING_SDK_LOG_LEVEL = oldLevel;
+      rmSync(join(logFile, ".."), { recursive: true, force: true });
+    }
+  });
+
+  it("未设 DSH_WING_SDK_LOG → loggerLevel ERROR 且不提供 logger", () => {
+    const old = process.env.DSH_WING_SDK_LOG;
+    delete process.env.DSH_WING_SDK_LOG;
+    try {
+      buildLarkClient({ appId: "a", appSecret: "s" });
+      expect(lastClient().opts.loggerLevel).toBe("ERROR");
+      expect(lastClient().opts.logger).toBeUndefined();
+    } finally {
+      if (old !== undefined) process.env.DSH_WING_SDK_LOG = old;
     }
   });
 });
