@@ -383,4 +383,20 @@ describe("企微审批（platformOf = wecom）", () => {
     expect(bridge.onTextInbound("LiangXianSheng", "1", { chatType: "p2p", operatorId: "SomeoneElse" })).toBe(true);
     await expect(p).resolves.toBe("rejected");
   });
+
+  it("★ chatIdFromAgentId 认 wecom: 前缀（平台前缀迁移后的失配修复）", () => {
+    expect(chatIdFromAgentId("wecom:LiangXianSheng:9a9d88770830:0")).toBe("LiangXianSheng");
+    expect(chatIdFromAgentId("feishu:oc_1:123:0")).toBe("oc_1");
+    expect(chatIdFromAgentId("web-session-1")).toBeUndefined();
+  });
+
+  it("★ wecom: 前缀会话的审批也走文本通道（此前认不出会话 → 丢给 GUI）", async () => {
+    const { bridge, sendCard, sendText } = mkBridge({ platformOf: wecom });
+    const p = bridge.answer(req({ agent: { id: "wecom:LiangXianSheng:9a9d88770830:0" } }) as any, next);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sendCard).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("1 = ✅ 允许一次"));
+    expect(bridge.onTextInbound("LiangXianSheng", "1", { chatType: "p2p" })).toBe(true);
+    await expect(p).resolves.toBe("allowed-once");
+  });
 });

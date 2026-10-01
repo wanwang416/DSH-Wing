@@ -7,7 +7,7 @@
  * - agent.ctx.on("session/event", ...) 订阅 6 种事件
  */
 
-import { makeSessionId, resetRunNonce } from "../session/mapper.js";
+import { makeSessionId, resetRunNonce, chatIdFromSessionId } from "../session/mapper.js";
 import { toSessionEventOut, type SessionEventOut } from "./forwarder.js";
 import { applyPermission } from "./permission.js";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
@@ -202,8 +202,9 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
 /** 恢复历史 session（routes.json 有映射、重启后） */
 export async function resumeAgent(deps: CreateAgentDeps, sessionId: string): Promise<WingAgentHandle> {
   const { ctx } = deps;
-  // P1-2 live 模型对象（chatId 从 sessionId 反推：feishu:<chatId>:...）
-  const chatIdOf = sessionId.startsWith("feishu:") ? sessionId.slice("feishu:".length).split(":")[0] ?? sessionId : sessionId;
+  // P1-2 live 模型对象（chatId 从 sessionId 反推：<平台>:<chatId>:...）
+  // ★ 2026-10-01：认 feishu:/wecom: 两种前缀（此前只认 feishu:，企微会话反推出整个 sessionId）
+  const chatIdOf = chatIdFromSessionId(sessionId) ?? sessionId;
   let live: { provider: string; model: string };
   if (deps.getModelLive) {
     live = deps.getModelLive(chatIdOf);
@@ -248,8 +249,9 @@ export async function resumeAgent(deps: CreateAgentDeps, sessionId: string): Pro
     const out = toSessionEventOut(ev);
     if (out) {
       try {
-        // resume 的 session 需要 chatId——从 sessionId 反推：feishu:<chatId>:...
-        const chatId = sessionId.slice("feishu:".length).split(":")[0] ?? sessionId;
+        // resume 的 session 需要 chatId——从 sessionId 反推：<平台>:<chatId>:...
+        // ★ 2026-10-01：认 feishu:/wecom: 两种前缀
+        const chatId = chatIdFromSessionId(sessionId) ?? sessionId;
         deps.onSessionEvent(chatId, out);
       } catch (err) {
         deps.logger?.warn?.(`onSessionEvent 失败: ${err instanceof Error ? err.message : String(err)}`);

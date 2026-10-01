@@ -62,6 +62,26 @@ export function chatPlatform(chatId: string): "feishu" | "wecom" | undefined {
   return platformRegistry.get(chatId);
 }
 
+/**
+ * ★ 2026-10-01：本插件会话 id 形如 `<平台>:<chatId>:<runNonce>:<gen>`。
+ * 9/17「补平台前缀」之后企微会话变成 `wecom:` 开头，而提问桥/审批桥/chatId 反推
+ * 还在硬编码 `feishu:` → 全部失配（企微提问被丢给 GUI、审批认不出会话）。
+ * 统一走下面两个函数，避免再出现「只认一个前缀」的漂移。
+ */
+export const BRIDGE_SESSION_PREFIXES = [SESSION_PREFIX, WECOM_SESSION_PREFIX] as const;
+
+/** 是否本插件的会话 id（feishu: / wecom: 都算） */
+export function isBridgeSessionId(sessionId: string | undefined): boolean {
+  return typeof sessionId === "string" && BRIDGE_SESSION_PREFIXES.some((p) => sessionId.startsWith(`${p}:`));
+}
+
+/** 从本插件 sessionId 反推 chatId；非本插件 → undefined */
+export function chatIdFromSessionId(sessionId: string): string | undefined {
+  const prefix = BRIDGE_SESSION_PREFIXES.find((p) => sessionId.startsWith(`${p}:`));
+  if (prefix === undefined) return undefined;
+  return sessionId.slice(prefix.length + 1).split(":")[0] || undefined;
+}
+
 export interface AgentHandleLike {
   agentId: string;
   sessionId: string;

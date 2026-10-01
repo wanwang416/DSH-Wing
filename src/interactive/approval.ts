@@ -18,6 +18,7 @@
  */
 
 import type { ApprovalOutcome, ApprovalRequest } from "@deepseek-ai/dsh-user-approval";
+import { chatIdFromSessionId } from "../session/mapper.js";
 
 export interface ApprovalMemoryDeps {
   file: string;
@@ -153,10 +154,11 @@ export function buildApprovalSettledCard(opts: { toolName: string; outcome: Appr
   };
 }
 
-/** 从 agent.id 反推 chatId（本插件 sessionId = feishu:<chatId>:<runNonce>:<gen>）；非本插件 → undefined */
+/** 从 agent.id 反推 chatId（本插件 sessionId = <平台>:<chatId>:<runNonce>:<gen>）；非本插件 → undefined */
 export function chatIdFromAgentId(agentId: string): string | undefined {
-  if (!agentId.startsWith("feishu:")) return undefined;
-  return agentId.slice("feishu:".length).split(":")[0] || undefined;
+  // ★ 2026-10-01：认 feishu:/wecom: 两种前缀（此前只认 feishu: → 企微会话审批桥认不出会话，
+  //   直接 next() 丢给 GUI，企微侧永远沉默）
+  return chatIdFromSessionId(agentId);
 }
 
 /**

@@ -12,6 +12,8 @@
  * - renderCardMap：飞书卡片结构（header.title 用 plain_text）
  */
 
+import { isBridgeSessionId, chatIdFromSessionId } from "../session/mapper.js";
+
 export interface QuestionOption {
   label: string;
   description?: string;
@@ -339,10 +341,11 @@ export function createUserQuestionBridge(deps: UserQuestionBridgeDeps) {
       const originalAsk = uq.ask.bind(uq);
       uq.ask = (async (request: any) => {
         const sessionId = request?.agent?.id;
-        const isFeishu = typeof sessionId === "string" && sessionId.startsWith("feishu:");
-        if (!isFeishu) return originalAsk(request);
-        const chatId = sessionId.slice("feishu:".length).split(":")[0];
-        if (!chatId) throw new UserQuestionBridgeError("feishu session 解析失败", ASK_MISSING_AGENT);
+        // ★ 2026-10-01：认 feishu:/wecom: 两种前缀（此前只认 feishu: → 企微会话的提问
+        //   被丢回 GUI provider，企微侧永远收不到问题）
+        if (!isBridgeSessionId(sessionId)) return originalAsk(request);
+        const chatId = chatIdFromSessionId(sessionId);
+        if (!chatId) throw new UserQuestionBridgeError("桥 session 解析失败", ASK_MISSING_AGENT);
         const answers: { id: string; selected: string[]; custom?: string }[] = [];
         for (const question of request?.questions ?? []) {
           answers.push(await askOne(chatId, request, question));

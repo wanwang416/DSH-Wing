@@ -308,4 +308,27 @@ describe("企微线路提问（platformOf = wecom）", () => {
     bridge.onCardAction("oc_1", "answer:q1:0");
     await expect(p).resolves.toEqual({ answers: [{ id: "q1", selected: ["A"] }] });
   });
+
+  it("★ wecom: 前缀会话同样接管（平台前缀迁移后的失配修复）", async () => {
+    const { bridge, sendCard, sendText } = makeBridge({ platformOf: wecom });
+    const ctx = makeCtx();
+    bridge.patchAsk(ctx);
+    void (ctx.userQuestions as any).ask({
+      agent: { id: "wecom:LiangXianSheng:9a9d88770830:0" },
+      questions: [{ id: "q1", question: "选？", options: [{ label: "A" }, { label: "B" }] }],
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sendCard).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("1. A"));
+  });
+
+  it("非本插件会话（web-xxx）→ 不接管，转发原 ask", async () => {
+    const { bridge, sendText } = makeBridge({ platformOf: wecom });
+    const originalAsk = vi.fn().mockResolvedValue({ answers: [] });
+    const ctx = makeCtx(originalAsk);
+    bridge.patchAsk(ctx);
+    await (ctx.userQuestions as any).ask({ agent: { id: "web-session-1" }, questions: [] });
+    expect(originalAsk).toHaveBeenCalledTimes(1);
+    expect(sendText).not.toHaveBeenCalled();
+  });
 });
