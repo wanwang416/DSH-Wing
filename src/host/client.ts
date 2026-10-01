@@ -7,7 +7,20 @@
  */
 
 import * as lark from "@larksuiteoapi/node-sdk";
-import { appendFileSync } from "node:fs";
+import { appendLevelLine, appendRotatingLine } from "../log/rotation.js";
+
+/** SDK 日志级别：未设 DSH_WING_SDK_LOG 时只报错；设了则按 DSH_WING_SDK_LOG_LEVEL（默认 warn）。 */
+function resolveSdkLoggerLevel(sdkLogFile: string): number {
+  if (!sdkLogFile) return lark.LoggerLevel.error;
+  const levels: Record<string, number> = {
+    trace: lark.LoggerLevel.trace,
+    debug: lark.LoggerLevel.debug,
+    info: lark.LoggerLevel.info,
+    warn: lark.LoggerLevel.warn,
+    error: lark.LoggerLevel.error,
+  };
+  return levels[(process.env.DSH_WING_SDK_LOG_LEVEL ?? "warn").toLowerCase()] ?? lark.LoggerLevel.warn;
+}
 
 export interface WingLarkClient {
   on(event: string, handler: (data: any) => void): void;
@@ -44,43 +57,17 @@ export function buildLarkClient(opts: {
   const domain = opts.domain === "lark" ? lark.Domain.Lark : lark.Domain.Feishu;
   // 诊断：SDK 日志落盘（M1 排障，验证后移除；DSH_WING_SDK_LOG 指向文件时启用）
   const sdkLogFile = process.env.DSH_WING_SDK_LOG ?? "";
+  const fmtSdk = (msg: unknown): string => (typeof msg === "string" ? msg : JSON.stringify(msg));
+  // ★ 2026-10-01 修复：这里原本对每个级别都无条件 appendFileSync —— 排障用的
+  //   DSH_WING_SDK_LOG 一旦忘记删除，debug 洪流会把磁盘写满（实测 180.7 MB）。
+  //   现在统一走 appendLevelLine：默认只落 warn/error，并带 16 MiB 上限 + 3 份归档。
   const sdkLogger = sdkLogFile
     ? {
-        info: (msg: unknown) => {
-          try {
-            appendFileSync(sdkLogFile, `[info] ${typeof msg === "string" ? msg : JSON.stringify(msg)}\n`);
-          } catch {
-            // 忽略
-          }
-        },
-        error: (msg: unknown) => {
-          try {
-            appendFileSync(sdkLogFile, `[error] ${typeof msg === "string" ? msg : JSON.stringify(msg)}\n`);
-          } catch {
-            // 忽略
-          }
-        },
-        debug: (msg: unknown) => {
-          try {
-            appendFileSync(sdkLogFile, `[debug] ${typeof msg === "string" ? msg : JSON.stringify(msg)}\n`);
-          } catch {
-            // 忽略
-          }
-        },
-        warn: (msg: unknown) => {
-          try {
-            appendFileSync(sdkLogFile, `[warn] ${typeof msg === "string" ? msg : JSON.stringify(msg)}\n`);
-          } catch {
-            // 忽略
-          }
-        },
-        trace: (msg: unknown) => {
-          try {
-            appendFileSync(sdkLogFile, `[trace] ${typeof msg === "string" ? msg : JSON.stringify(msg)}\n`);
-          } catch {
-            // 忽略
-          }
-        },
+        info: (msg: unknown) => appendLevelLine(sdkLogFile, "info", `[info] ${fmtSdk(msg)}\n`),
+        error: (msg: unknown) => appendLevelLine(sdkLogFile, "error", `[error] ${fmtSdk(msg)}\n`),
+        debug: (msg: unknown) => appendLevelLine(sdkLogFile, "debug", `[debug] ${fmtSdk(msg)}\n`),
+        warn: (msg: unknown) => appendLevelLine(sdkLogFile, "warn", `[warn] ${fmtSdk(msg)}\n`),
+        trace: (msg: unknown) => appendLevelLine(sdkLogFile, "trace", `[trace] ${fmtSdk(msg)}\n`),
       }
     : undefined;
   const clientOpts = {
@@ -88,7 +75,9 @@ export function buildLarkClient(opts: {
     appSecret: opts.appSecret,
     appType: lark.AppType.SelfBuild,
     domain,
-    loggerLevel: sdkLogFile ? lark.LoggerLevel.debug : lark.LoggerLevel.error,
+    // ★ 2026-10-01：级别从"设了就 debug"改为按 DSH_WING_SDK_LOG_LEVEL 选择（默认 warn），
+    //   避免 SDK 侧也生成大量 debug 日志对象的开销。
+    loggerLevel: resolveSdkLoggerLevel(sdkLogFile),
     ...(sdkLogger ? { logger: sdkLogger } : {}),
   };
   const sdkClient = new lark.Client(clientOpts);
@@ -132,7 +121,7 @@ export function buildLarkClient(opts: {
           opts.logger?.error?.(`ws start failed: ${err instanceof Error ? err.message : String(err)}`);
           // 排障：错误落盘（DSH_WING_SDK_LOG 未设置时默认路径）
           try {
-            appendFileSync(process.env.DSH_WING_SDK_LOG ?? "dsh-wing-ws-error.log", `${new Date().toISOString()} ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+            appendRotatingLine(process.env.DSH_WING_SDK_LOG ?? "dsh-wing-ws-error.log", `${new Date().toISOString()} ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
           } catch {
             // 忽略
           }

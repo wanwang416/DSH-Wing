@@ -9,7 +9,8 @@
  *       streaming.enabled 默认 true / permissionMode 默认 workspace-write
  */
 
-import { mkdirSync, writeFileSync, appendFileSync, existsSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, statSync } from "node:fs";
+import { appendRotatingLine } from "./log/rotation.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
@@ -92,12 +93,9 @@ export function apply(ctx: any, rawConfig: unknown): void {
   const cfg: WingConfig = getConfig(ctx, rawConfig);
   // ★ 日志落盘：所有 dsh-wing 日志同时写到 wing/dsh-wing.log，方便不依赖终端窗口排查
   const logFile = join(dir, "dsh-wing.log");
+  // ★ 2026-10-01：改为带上限与归档的写入（默认 16 MiB × 3 份），长期运行不再无限增长。
   const fileLog = (level: string, m: string) => {
-    try {
-      appendFileSync(logFile, `[${new Date().toISOString()}] [${level}] ${m}\n`);
-    } catch {
-      // 忽略写文件失败
-    }
+    appendRotatingLine(logFile, `[${new Date().toISOString()}] [${level}] ${m}\n`);
   };
   const logger = {
     info: (m: string) => { ctx.logger?.info?.(`[dsh-wing] ${m}`); fileLog("info", m); },
