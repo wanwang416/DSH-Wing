@@ -309,3 +309,78 @@ describe("buildApprovalSettledCard（纯函数）", () => {
     expect(els[0].tag).toBe("markdown");
   });
 });
+
+// ★ 2026-10-01 企微线路：企微无模板卡片 API → 审批降级为编号文本 + 文本回执
+describe("企微审批（platformOf = wecom）", () => {
+  const wecom = () => "wecom" as const;
+
+  it("发编号文本，不调 sendCard；回复 1 → allowed-once + 文本收口", async () => {
+    const { bridge, sendCard, updateCard, sendText } = mkBridge({ platformOf: wecom });
+    const p = bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sendCard).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("1 = ✅ 允许一次"));
+    expect(bridge.onTextInbound("LiangXianSheng", "1", { chatType: "p2p" })).toBe(true);
+    await expect(p).resolves.toBe("allowed-once");
+    expect(updateCard).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("已允许"));
+  });
+
+  it("回复 4 → rejected", async () => {
+    const { bridge, sendText } = mkBridge({ platformOf: wecom });
+    const p = bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bridge.onTextInbound("LiangXianSheng", "4", { chatType: "p2p" })).toBe(true);
+    await expect(p).resolves.toBe("rejected");
+    expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("已拒绝"));
+  });
+
+  it("回复 3 → 永久记忆 + allowed-once（下次同工具不再问）", async () => {
+    const { bridge } = mkBridge({ platformOf: wecom });
+    const p = bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bridge.onTextInbound("LiangXianSheng", "3", { chatType: "p2p" })).toBe(true);
+    await expect(p).resolves.toBe("allowed-once");
+    // 记忆命中 → 第二次直接放行，且不再发文本
+    const p2 = bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
+    await expect(p2).resolves.toBe("allowed-once");
+  });
+
+  it("群聊不消费文本审批（必须走卡片，防群成员代批）→ false 且保持待批", async () => {
+    const { bridge, logger } = mkBridge({ platformOf: wecom });
+    void bridge.answer(req({ agent: { id: "feishu:wr_group:1:0" } }) as any, next);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bridge.onTextInbound("wr_group", "1", { chatType: "group" })).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("非私聊"));
+  });
+
+  it("识别不出的文本 → 不消费 + 提示重试（保持待批）", async () => {
+    const { bridge, sendText } = mkBridge({ platformOf: wecom });
+    void bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bridge.onTextInbound("LiangXianSheng", "?", { chatType: "p2p" })).toBe(false);
+    expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("请回复 1-4"));
+  });
+
+  it("飞书路由不受影响：走卡片，文本回复不消费", async () => {
+    const { bridge, sendCard } = mkBridge();
+    void bridge.answer(req() as any, next);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sendCard).toHaveBeenCalledTimes(1);
+    expect(bridge.onTextInbound("oc_1", "1", { chatType: "p2p" })).toBe(false);
+  });
+
+  it("企微发送失败 → unavailable（fail-closed）", async () => {
+    const { bridge } = mkBridge({ platformOf: wecom, sendText: vi.fn().mockRejectedValue(new Error("boom")) });
+    await expect(bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next)).resolves.toBe("unavailable");
+  });
+
+  it("wecomBossUserId 配置后：非老板回复 → 直接 rejected", async () => {
+    const { bridge } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng" });
+    const p = bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
+    await new Promise((r) => setTimeout(r, 0));
+    // 注意：非老板场景用别的 chat 无法命中 entry，这里用 operatorId 不匹配验证拦截
+    expect(bridge.onTextInbound("LiangXianSheng", "1", { chatType: "p2p", operatorId: "SomeoneElse" })).toBe(true);
+    await expect(p).resolves.toBe("rejected");
+  });
+});

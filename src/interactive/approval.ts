@@ -83,6 +83,14 @@ export interface ApprovalBridgeDeps {
   logger?: { info?(m: string): void; warn?(m: string): void };
   /** Always 记忆落盘文件 */
   memoryFile: string;
+  /**
+   * ★ 2026-10-01 企微线路：判定该 chat 走哪条通道。
+   *   "wecom" → 企微没有模板卡片 API，改发「编号文本审批」（回复 1-4 决策）
+   *   其余（含 undefined）→ 保持原飞书审批卡行为，一字不变
+   */
+  platformOf?(chatId: string): "feishu" | "wecom" | undefined;
+  /** ★ 企微老板 userid（企微身份与飞书 open_id 不同源；配置后文本审批做精确限定） */
+  wecomBossUserId?: string;
 }
 
 interface PendingEntry {
@@ -151,6 +159,48 @@ export function chatIdFromAgentId(agentId: string): string | undefined {
   return agentId.slice("feishu:".length).split(":")[0] || undefined;
 }
 
+/**
+ * ★ 2026-10-01 企微线路：审批文本（对齐 buildApprovalCard 的四选项与顺序）。
+ * 企微智能机器人没有模板卡片 API，只能用文本 + 编号回复。
+ */
+export function buildApprovalText(opts: { entryId: string; toolName: string; reason?: string }): string {
+  return [
+    `🔓 操作审批`,
+    ``,
+    `⚠️ ${opts.toolName} 请求执行`,
+    opts.reason ?? "（无说明）",
+    ``,
+    `请回复数字决定：`,
+    `1 = ✅ 允许一次（仅本次）`,
+    `2 = 🕐 本会话允许（同工具不再问）`,
+    `3 = ♾️ 永久允许（写盘记忆）`,
+    `4 = ❌ 拒绝`,
+    ``,
+    `（回复其他内容视为未决，超时自动失效）`,
+  ].join("\n");
+}
+
+/** ★ 2026-10-01 企微线路：审批收口文本（对齐 buildApprovalSettledCard） */
+export function buildApprovalSettledText(opts: { toolName: string; outcome: ApprovalOutcome }): string {
+  const table: Record<ApprovalOutcome, string> = {
+    "allowed-once": `✅ 已允许 ${opts.toolName} 本次执行。`,
+    rejected: `❌ 已拒绝 ${opts.toolName} 执行。`,
+    cancelled: `⏰ ${opts.toolName} 的审批请求已失效（超时或中断）。`,
+    unavailable: `⚠️ 审批提示发送失败，${opts.toolName} 未放行（fail-closed）。`,
+  };
+  return table[opts.outcome];
+}
+
+/** ★ 2026-10-01：企微文本审批的决策解析（1-4 / 文字别名）；无法识别 → undefined */
+export function parseApprovalTextAnswer(text: string): "allow-once" | "session" | "always" | "deny" | undefined {
+  const t = text.trim().toLowerCase();
+  if (t === "1" || t === "允许" || t === "允许一次" || t === "同意" || t === "allow" || t === "yes" || t === "y") return "allow-once";
+  if (t === "2" || t === "本会话" || t === "会话" || t === "session") return "session";
+  if (t === "3" || t === "永久" || t === "永久允许" || t === "always") return "always";
+  if (t === "4" || t === "拒绝" || t === "deny" || t === "no" || t === "n") return "deny";
+  return undefined;
+}
+
 export function createApprovalBridge(deps: ApprovalBridgeDeps) {
   const pending = new Map<string, PendingEntry>();
   const memory = createApprovalMemory({ file: deps.memoryFile });
@@ -179,6 +229,7 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
     }
 
     // 无记忆 → 发审批卡，等用户决策（超时/abort → cancelled，fail-closed）
+    const textMode = deps.platformOf?.(chatId) === "wecom";
     return await new Promise<ApprovalOutcome>((resolve) => {
       const entryId = `a${++entryCounter}_${Date.now()}`;
       const toolName = req.toolName;
@@ -197,6 +248,9 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
           void deps
             .updateCard(sentCardMessageId, JSON.stringify(buildApprovalSettledCard({ toolName, outcome })))
             .catch(() => void 0);
+        } else if (textMode) {
+          // ★ 2026-10-01 企微线路：无卡片可收口 → 补一条文本结果
+          void Promise.resolve(deps.sendText(chatId, buildApprovalSettledText({ toolName, outcome }))).catch(() => void 0);
         }
         resolve(outcome);
       };
@@ -210,17 +264,31 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
       timer.unref?.();
       req.signal?.addEventListener("abort", () => settle("cancelled"), { once: true });
       try {
-        // Bug3b：审批卡直发 sender.sendCard → resolve 后捕获 message_id，供 settle 决策后收口换状态卡
-        void deps
-          .sendCard(chatId, buildApprovalCard({ entryId, toolName, reason: req.reason, bossOpenId: deps.bossOpenId }))
-          .then((res) => {
-            sentCardMessageId = deps.messageIdOf(res);
-          })
-          .catch((err) => {
-            // 发卡失败 → fail-closed（settle 幂等：超时/abort 先触发则不覆盖）
-            deps.logger?.warn?.(`审批卡发送失败 chat=${chatId}: ${err instanceof Error ? err.message : String(err)}`);
-            settle("unavailable");
-          });
+        if (textMode) {
+          // ★ 2026-10-01 企微线路：无模板卡片 API → 发编号文本审批（回复 1-4 决策，见 onTextInbound）
+          Promise.resolve(deps.sendText(chatId, buildApprovalText({ entryId, toolName, reason: req.reason })))
+            .then(() => {
+              deps.logger?.info?.(`审批已发送（企微文本模式）chat=${chatId} tool=${toolName} entry=${entryId}`);
+            })
+            .catch((err) => {
+              deps.logger?.warn?.(
+                `企微审批文本发送失败 chat=${chatId} tool=${toolName}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              settle("unavailable");
+            });
+        } else {
+          // Bug3b：审批卡直发 sender.sendCard → resolve 后捕获 message_id，供 settle 决策后收口换状态卡
+          void deps
+            .sendCard(chatId, buildApprovalCard({ entryId, toolName, reason: req.reason, bossOpenId: deps.bossOpenId }))
+            .then((res) => {
+              sentCardMessageId = deps.messageIdOf(res);
+            })
+            .catch((err) => {
+              // 发卡失败 → fail-closed（settle 幂等：超时/abort 先触发则不覆盖）
+              deps.logger?.warn?.(`审批卡发送失败 chat=${chatId}: ${err instanceof Error ? err.message : String(err)}`);
+              settle("unavailable");
+            });
+        }
       } catch (err) {
         // 防御：同步 throw（如 mock 同步抛）→ fail-closed
         deps.logger?.warn?.(`审批卡发送同步异常 chat=${chatId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -274,7 +342,59 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
     return true;
   }
 
-  return { answer, onCardAction, chatIdFromAgentId };
+  /**
+   * ★ 2026-10-01 企微线路：文本审批回执（企微无卡片 API，用编号回复决策）。
+   * 安全约束（拍板④）：仅接受**私聊**（chatType=p2p）的文本审批；群聊必须走卡片，
+   *   避免群成员代批。识别不出决策时不消费（消息照常进 agent），但回一条提示。
+   * @returns true=已消费该消息（index.ts 不再当普通消息注入 agent）
+   */
+  function onTextInbound(chatId: string, text: string, ctx?: { operatorId?: string; chatType?: "p2p" | "group" }): boolean {
+    let entry: PendingEntry | undefined;
+    for (const e of pending.values()) {
+      if (e.chatId === chatId) {
+        entry = e;
+        break;
+      }
+    }
+    if (!entry) return false;
+    if (deps.platformOf?.(chatId) !== "wecom") return false; // 飞书走卡片按钮，不抢文本
+    if (ctx?.chatType !== undefined && ctx.chatType !== "p2p") {
+      deps.logger?.warn?.(`企微文本审批未消费（非私聊 chatType=${ctx.chatType}）chat=${chatId} tool=${entry.toolName}`);
+      return false;
+    }
+    if (deps.wecomBossUserId !== undefined && ctx?.operatorId !== undefined && ctx.operatorId !== deps.wecomBossUserId) {
+      deps.logger?.warn?.(`企微文本审批被非老板拦截 operator=${ctx.operatorId} tool=${entry.toolName} → rejected`);
+      entry.settle("rejected");
+      void Promise.resolve(deps.sendText(chatId, "🔐 审批仅限老板本人操作，已拒绝该请求。")).catch(() => void 0);
+      return true;
+    }
+    const decision = parseApprovalTextAnswer(text);
+    if (decision === undefined) {
+      deps.logger?.info?.(`企微文本审批：未识别回复（保持待批）chat=${chatId} text="${text.slice(0, 20)}"`);
+      void Promise.resolve(deps.sendText(chatId, "⚠️ 有待审批请求，请回复 1-4 决定（其他内容已照常转给助手）。")).catch(() => void 0);
+      return false;
+    }
+    switch (decision) {
+      case "allow-once":
+        entry.settle("allowed-once");
+        break;
+      case "deny":
+        entry.settle("rejected");
+        break;
+      case "session":
+        memory.addSession(chatId, entry.toolName);
+        entry.settle("allowed-once");
+        break;
+      case "always":
+        memory.addAlways(chatId, entry.toolName);
+        entry.settle("allowed-once");
+        break;
+    }
+    deps.logger?.info?.(`企微文本审批决策 chat=${chatId} tool=${entry.toolName} decision=${decision}`);
+    return true;
+  }
+
+  return { answer, onCardAction, onTextInbound, chatIdFromAgentId };
 }
 
 export type ApprovalBridge = ReturnType<typeof createApprovalBridge>;

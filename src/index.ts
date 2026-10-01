@@ -374,6 +374,9 @@ export function apply(ctx: any, rawConfig: unknown): void {
     bossOpenId: cfg.bossOpenId,
     timeoutMs: cfg.turnTimeoutMs,
     memoryFile: join(dir, "approval-memory.json"),
+    // ★ 2026-10-01 企微线路：审批在企微降级为编号文本（复用与提问桥同一份线路判定）
+    platformOf: questionPlatformOf,
+    // 企微老板 userid 未配置 → 文本审批仅限私聊（群聊必须走卡片），并在非私聊时留痕
     logger,
   });
   // 注册 answerer（cordis waterfall：返回 outcome 认领；非 feishu agent → next() 让后续）
@@ -606,6 +609,21 @@ export function apply(ctx: any, rawConfig: unknown): void {
         return;
       }
       // 1) 立即构造用户消息（不排队）
+      // ★ 2026-10-01 企微线路：待审批的文本回执（1=允许一次 / 2=本会话 / 3=永久 / 4=拒绝）
+      //   与提问桥并列：提问优先（同时待答时先消费提问），审批次之；两者都未命中才进正常流程
+      if (approvalBridge.onTextInbound(msg.chatId, msg.text, { operatorId: msg.userId, chatType: msg.chatType })) {
+        inboundWal.accept({
+          messageId: msg.messageId,
+          chatId: msg.chatId,
+          chatType: msg.chatType,
+          text: msg.text,
+          senderOpenId: msg.userId,
+        });
+        inboundWal.delivered(msg.messageId);
+        compensation.noteDelivered(msg.messageId);
+        status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
+        return;
+      }
       const message = createUserMessage({
         content: [{ type: "text", text: msg.text }],
         source: { kind: "user" },
