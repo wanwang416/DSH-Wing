@@ -99,4 +99,21 @@ describe("阶段4 A组：WAL 段回收（M1/M2/M20）", () => {
     wal.prune();
     expect(wal.pendingCount()).toBe(1);
   });
+
+  it("M1 补（阿深验收发现）：启动即收敛——多段残留时，仅构造实例就收敛为 1 段（旧实现要等首条消息，必红）", () => {
+    // 造 3 个历史段（每段 1 条），模拟长期运行留下的堆积
+    // ★ 注意：不能用 seedSegs 调三次——它的段名固定为 `seg-${base + i*1000}`，多次调用会写同一个文件
+    //   （阿深写这条时先踩了这个坑：段数断言"歪打正着"过了，日志断言才把问题揪出来）。此处直接写三个不同名段。
+    writeFileSync(join(dir, "seg-1000000000001.jsonl"), JSON.stringify(makeRec({ messageId: "boot-1" })) + "\n");
+    writeFileSync(join(dir, "seg-1000000000002.jsonl"), JSON.stringify(makeRec({ messageId: "boot-2" })) + "\n");
+    writeFileSync(join(dir, "seg-1000000000003.jsonl"), JSON.stringify(makeRec({ messageId: "boot-3" })) + "\n");
+    // ★ 只构造实例：不 accept、不 prune、不 delivered
+    createInboundWal({ dir, logger });
+    const segs = readdirSync(dir).filter((f) => /^seg-.*\.jsonl$/.test(f));
+    expect(segs.length).toBe(1); // 旧实现：3 段原样留着（回收要等后续流量）
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("WAL 段回收"));
+    // 记录不能丢：收敛后的段仍含全部 3 条
+    const content = segs.map((f) => readFileSync(join(dir, f), "utf8")).join("");
+    for (const id of ["boot-1", "boot-2", "boot-3"]) expect(content).toContain(id);
+  });
 });

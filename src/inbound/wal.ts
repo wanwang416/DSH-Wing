@@ -106,6 +106,16 @@ export function createInboundWal(deps: InboundWalDeps) {
   }
 
   load();
+  // ★ M1 补（2026-10-02 阿深验收发现）：**启动即收敛**段文件。
+  //   原实现只在 persistAll（accept / delivered / prune）里回收 → 若启动后长期没有 inbound 流量，
+  //   历史旧段会一直留着；实测 550 段一直挂到重启，而且因为 index.ts 当时没接线 logger，
+  //   连"回收了"这件事都看不到。这里只多读一次目录计数，>1 段才收敛，正常情况零额外开销。
+  try {
+    const segCount = readdirSync(dir).filter((f) => /^seg-.*\.jsonl$/.test(f)).length;
+    if (segCount > 1) persistAll();
+  } catch {
+    // 列目录失败不阻塞启动（persistAll 内有独立的 warn 通道）
+  }
 
   return {
     /** 消息开始处理前：落盘 */

@@ -205,7 +205,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
   // ---------- 连接监督（M2：probe + 配额熔断 + 自动重连，WS 假死根因解决） ----------
   const quota = createQuotaGovernor(join(dir, "conn-history.jsonl"), { windowMinutes: 60, limit: 12 });
-  const inboundWal = createInboundWal({ dir: join(dir, "inbound-wal") });
+  // ★ 阿深验收修正（2026-10-02）：必须接线 logger —— 否则 wal.ts 里所有回收 / prune 日志
+  //   都被 `deps.logger?.info?.()` 静默吞掉（实测重启后段数确实 550→1，但日志零痕迹，
+  //   违反"不许静默成功"铁律）。
+  const inboundWal = createInboundWal({ dir: join(dir, "inbound-wal"), logger });
   const compensation = createMissedCompensation({
     routes: routeStore,
     listMessages: async ({ chatId, startTimeMs, endTimeMs }) => {
