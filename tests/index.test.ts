@@ -29,6 +29,7 @@ const h = vi.hoisted(() => {
     nextAction: "queued" as string,
     nextTextInbound: false,
     shouldProcess: true,
+    outboxRebuilds: 0, // ★ L14：outbox.rebuildFromDisk 共享调用计数
     credResolve: async () => ({ appId: "a", appSecret: "s", domain: "feishu" }),
     replays: [] as any[],
     replayMarked: true,
@@ -242,12 +243,17 @@ vi.mock("../src/outbound/outbox.js", () => ({
   // ★ M11（2026-10-02）：experience/index 改用 describeError 串行化错误对象，mock 需透出真实实现
   describeError: (err: unknown) =>
     err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err),
-  createOutbox: vi.fn(() => ({
-    enqueue: vi.fn((env: any) => { h.enqueued.push(env); return Promise.resolve(); }),
-    rebuildFromDisk: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-    stop: vi.fn().mockResolvedValue(undefined),
-  })),
+  createOutbox: vi.fn(() => {
+    const instance = {
+      enqueue: vi.fn((env: any) => { h.enqueued.push(env); return Promise.resolve(); }),
+      // ★ L14（2026-10-02 阶段4）：共享计数（每个实例独立 vi.fn 无法聚合断言重建次数）
+      rebuildFromDisk: vi.fn(() => { h.outboxRebuilds += 1; }),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+    // ★ L14：模拟真实 outbox.start() 语义（内部会调 rebuildFromDisk，src/outbound/outbox.ts:388）
+    instance["start" as keyof typeof instance] = vi.fn(async () => { instance.rebuildFromDisk(); });
+    return instance;
+  }),
 }));
 
 vi.mock("../src/outbound/streaming-card.js", () => ({
@@ -339,6 +345,7 @@ beforeEach(() => {
   process.env.DSH_HOME = dir;
   // 重置行为开关
   h.nextAction = "queued";
+  h.outboxRebuilds = 0; // ★ L14：每用例重置共享计数
   h.nextTextInbound = false;
   h.shouldProcess = true;
   h.credResolve = async (_ref?: string) => ({ appId: "a", appSecret: "s", domain: "feishu" });
@@ -441,6 +448,13 @@ describe("index.ts apply 集成（M4 覆盖重构）", () => {
     const ctx = makeCtx();
     await startBridge(ctx);
     await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge started")));
+  });
+
+  it("startBridge：outbox 重建只发生一次（L14：显式 rebuildFromDisk 已删，start() 内部调用）", async () => {
+    const ctx = makeCtx();
+    await startBridge(ctx);
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge started")));
+    expect(h.outboxRebuilds).toBe(1); // 旧实现=2（index.ts 显式一次 + start() 内部一次）
   });
 
   it("onMessage：群聊被群策略忽略 → 不进入处理管线", async () => {

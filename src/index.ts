@@ -1101,8 +1101,9 @@ export function apply(ctx: any, rawConfig: unknown): void {
         //   永远反映启动那一刻的快照（体检 G15 根因）。
         onWsState: (s, d) => supervisor.notifyWsState(s, d),
       });
-      // 3) outbox 重建 + 启动
-      outbox.rebuildFromDisk();
+      // 3) outbox 启动
+      // ★ L14（2026-10-02 阶段4）：删除显式 rebuildFromDisk()——start() 内部已调用，
+      //   旧写法每次启动同步 IO 读两遍全部段文件，日志出现两行相同的「outbox 重建：…」。
       await outbox.start();
       // 4) 轮次监督
       turnSupervisor.start();
