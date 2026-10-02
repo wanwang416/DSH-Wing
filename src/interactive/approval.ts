@@ -24,16 +24,22 @@ export interface ApprovalMemoryDeps {
   file: string;
 }
 
-/** 审批记忆（Session 内存 / Always 落盘 JSON，键 = "chatId:toolName"） */
+/** 审批记忆（Session 内存 / Always 落盘 JSON）★ G6（阶段5b）：键绑定批准者身份，只对同一批准者自动放行 */
 export function createApprovalMemory(deps: ApprovalMemoryDeps) {
-  // Session 记忆（进程内存）：本会话同 toolName 不再弹
+  // Session 记忆（进程内存）：键 = chatId:toolName:operatorId —— 只对同一批准者生效
   const session = new Set<string>();
-  // Always 记忆（落盘）：重启保留
+  // Always 记忆（落盘）：{ "chatId:toolName": [operatorId...] } —— 记录"该工具由谁永久放行"
   let always = new Map<string, Set<string>>();
   try {
     const raw = readFileSync(deps.file, "utf8");
-    const parsed = JSON.parse(raw) as Record<string, string[]>;
-    always = new Map(Object.entries(parsed).map(([k, v]) => [k, new Set(v)]));
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(parsed)) {
+      // 兼容两种历史格式：string[]（旧，无身份）→ 忽略其自动放行效力（fail-closed：
+      // 旧格式无法证明是谁批准的，不该给任何人免审批特权，重新走一次审批即可重建）
+      if (Array.isArray(v) && v.every((x) => typeof x === "string")) {
+        always.set(k, new Set(v as string[]));
+      }
+    }
   } catch {
     always = new Map();
   }
@@ -44,19 +50,21 @@ export function createApprovalMemory(deps: ApprovalMemoryDeps) {
       // 忽略
     }
   };
-  const key = (chatId: string, toolName: string): string => `${chatId}:${toolName}`;
+  const key = (chatId: string, toolName: string, operatorId?: string): string =>
+    operatorId ? `${chatId}:${toolName}:${operatorId}` : `${chatId}:${toolName}:__nobody__`;
   return {
-    shouldAutoAllow(chatId: string, toolName: string): boolean {
-      const k = key(chatId, toolName);
-      return session.has(k) || always.get(k) !== undefined;
+    /** ★ G6：记忆命中必须带请求发起者身份——只对当初批准的那个人自动放行 */
+    shouldAutoAllow(chatId: string, toolName: string, operatorId?: string): boolean {
+      const k = key(chatId, toolName, operatorId);
+      return session.has(k) || (always.get(`${chatId}:${toolName}`)?.has(operatorId ?? "__nobody__") ?? false);
     },
-    addSession(chatId: string, toolName: string): void {
-      session.add(key(chatId, toolName));
+    addSession(chatId: string, toolName: string, operatorId?: string): void {
+      session.add(key(chatId, toolName, operatorId));
     },
-    addAlways(chatId: string, toolName: string): void {
-      const k = key(chatId, toolName);
+    addAlways(chatId: string, toolName: string, operatorId?: string): void {
+      const k = `${chatId}:${toolName}`;
       const set = always.get(k) ?? new Set<string>();
-      set.add(toolName);
+      set.add(operatorId ?? "__nobody__");
       always.set(k, set);
       persist();
     },
@@ -207,16 +215,14 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
   const pending = new Map<string, PendingEntry>();
   const memory = createApprovalMemory({ file: deps.memoryFile });
   let entryCounter = 0;
-  let bossWarned = false;
 
-  /** 老板限定（拍板④）：配置 bossOpenId → 点击者必须匹配；未配置 → 单用户宽松 + warn 一次 */
   const isBoss = (openId: string | undefined): boolean => {
-    if (deps.bossOpenId) return openId === deps.bossOpenId;
-    if (!bossWarned) {
-      deps.logger?.warn?.("审批卡未配置 bossOpenId——老板限定未生效（群聊他人可点）。建议在 config.json 配置 WING_LARK_APP 老板 open_id。");
-      bossWarned = true;
+    // ★ M15（阶段5b）：fail-closed——bossOpenId 未配置 → 一律拒绝（不再单用户宽松），warn 每次都打
+    if (!deps.bossOpenId) {
+      deps.logger?.warn?.("未配置老板身份（bossOpenId），审批不可用——请在 config 配置 WING_LARK_APP 老板 open_id 后重启。（每次拒绝都留痕）");
+      return false;
     }
-    return true;
+    return openId === deps.bossOpenId;
   };
 
   /** approval/request answerer（waterfall）：返回 outcome 认领，非本插件 agent → next() */
@@ -225,7 +231,9 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
     if (!chatId) return next(); // 非本插件 agent，让其他 answerer
 
     // 记忆命中（Always/Session）→ 直接放行，不发卡
-    if (memory.shouldAutoAllow(chatId, req.toolName)) {
+    // ★ G6（阶段5b）最终口径：记忆**只对同一批准者**自动放行。answer 阶段请求发起者身份 =
+    //   该 chat 的归属者（p2p chatId ≡ 用户 openId/userid，由 parser 保证），把它传给记忆层核对。
+    if (memory.shouldAutoAllow(chatId, req.toolName, chatId)) {
       deps.logger?.info?.(`审批记忆命中（always）chat=${chatId} tool=${req.toolName} → allowed-once`);
       return "allowed-once";
     }
@@ -238,6 +246,8 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
       let settled = false;
       // ★ Bug3b：记录已发卡 message_id，供 settle 决策后 updateCard 收口换状态卡
       let sentCardMessageId: string | undefined;
+      // ★ M16（阶段5b）：发卡 promise 句柄——settle 若先于发卡完成触发，等待其 resolve 后补刷终态
+      let sendCardDone: Promise<void> = Promise.resolve();
       // timer 先声明（settle 闭包引用；TDZ 安全——settle 只在事件回调/超时/abort 时被调，彼时已赋值）
       let timer: ReturnType<typeof setTimeout> | undefined;
       const settle = (outcome: ApprovalOutcome): void => {
@@ -246,14 +256,21 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
         if (timer) clearTimeout(timer);
         pending.delete(entryId);
         // ★ Bug3b：收口——把原四按钮卡替换成状态卡（✅已允许/❌已拒绝/⏰已失效），不再停留可操作界面
-        if (sentCardMessageId) {
-          void deps
-            .updateCard(sentCardMessageId, JSON.stringify(buildApprovalSettledCard({ toolName, outcome })))
-            .catch(() => void 0);
-        } else if (textMode) {
-          // ★ 2026-10-01 企微线路：无卡片可收口 → 补一条文本结果
-          void Promise.resolve(deps.sendText(chatId, buildApprovalSettledText({ toolName, outcome }))).catch(() => void 0);
-        }
+        // ★ M16（阶段5b）：settle 先等"发卡完成"，再按已回填的 message_id 刷终态——
+        //   覆盖三类竞态：① 卡还没发完用户就决策/超时 ② 发卡完成但秒点 ③ 发卡失败（unavailable，
+        //   无 messageId 可刷，走 textMode 文本收口）。任何收口路径最终都把卡刷成终态。
+        void sendCardDone.then(() => {
+          if (sentCardMessageId) {
+            return deps
+              .updateCard(sentCardMessageId, JSON.stringify(buildApprovalSettledCard({ toolName, outcome })))
+              .catch(() => void 0);
+          }
+          if (textMode) {
+            // ★ 2026-10-01 企微线路：无卡片可收口 → 补一条文本结果
+            return Promise.resolve(deps.sendText(chatId, buildApprovalSettledText({ toolName, outcome }))).catch(() => void 0);
+          }
+          return undefined;
+        });
         resolve(outcome);
       };
       const entry: PendingEntry = { chatId, toolName, settle };
@@ -280,7 +297,8 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
             });
         } else {
           // Bug3b：审批卡直发 sender.sendCard → resolve 后捕获 message_id，供 settle 决策后收口换状态卡
-          void deps
+          // ★ M16：记录发卡完成 promise（settle 早于发卡完成时，等它 resolve 再补刷终态）
+          sendCardDone = deps
             .sendCard(chatId, buildApprovalCard({ entryId, toolName, reason: req.reason, bossOpenId: deps.bossOpenId }))
             .then((res) => {
               sentCardMessageId = deps.messageIdOf(res);
@@ -299,10 +317,7 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
     });
   }
 
-  /**
-   * 审批卡回调（event-handler op 路由：approval:<entryId>:<decision>）。
-   * @param operatorOpenId 点击者 open_id（老板限定校验用，拍板④）
-   */
+  /** 审批卡回调（event-handler op 路由：approval:<entryId>:<decision>）*/
   function onCardAction(chatId: string, op: string, operatorOpenId?: string): boolean {
     const body = op.slice(APPROVAL_OP_PREFIX.length); // <entryId>:<decision>
     const sep = body.indexOf(":");
@@ -314,11 +329,14 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
       deps.logger?.warn?.(`审批卡回调：entry 不存在或 chatId 不匹配 entryId=${entryId} chatId=${chatId}`);
       return false;
     }
-    // 老板限定（拍板④）：非老板 → 拒绝 + 回执（fail-closed，群聊防他人代批）
+    // 老板限定（拍板④ + ★M15 阶段5b fail-closed）：非老板或未配置 → 拒绝 + 人话回执（每次留痕）
     if (!isBoss(operatorOpenId)) {
-      deps.logger?.warn?.(`审批卡被非老板点击拦截 openId=${operatorOpenId ?? "unknown"} tool=${entry.toolName} → rejected`);
+      const reason = !deps.bossOpenId
+        ? "❓ 未配置老板身份（bossOpenId），审批不可用——请在 config 配置 WING_LARK_APP 老板 open_id 后重启。本次已拒绝（fail-closed）。"
+        : "🔐 审批卡仅限老板本人操作，已拒绝该请求。";
+      deps.logger?.warn?.(`审批卡拦截 openId=${operatorOpenId ?? "unknown"} tool=${entry.toolName} configured=${Boolean(deps.bossOpenId)} → rejected`);
       entry.settle("rejected");
-      deps.sendText(chatId, "🔐 审批卡仅限老板本人操作，已拒绝该请求。");
+      deps.sendText(chatId, reason);
       return true;
     }
     switch (decision) {
@@ -329,11 +347,11 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
         entry.settle("rejected");
         break;
       case "session":
-        memory.addSession(chatId, entry.toolName);
+        memory.addSession(chatId, entry.toolName, operatorOpenId); // ★ G6：绑定批准者
         entry.settle("allowed-once");
         break;
       case "always":
-        memory.addAlways(chatId, entry.toolName);
+        memory.addAlways(chatId, entry.toolName, operatorOpenId); // ★ G6：绑定批准者
         entry.settle("allowed-once");
         break;
       default:
@@ -364,10 +382,21 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
       deps.logger?.warn?.(`企微文本审批未消费（非私聊 chatType=${ctx.chatType}）chat=${chatId} tool=${entry.toolName}`);
       return false;
     }
-    if (deps.wecomBossUserId !== undefined && ctx?.operatorId !== undefined && ctx.operatorId !== deps.wecomBossUserId) {
-      deps.logger?.warn?.(`企微文本审批被非老板拦截 operator=${ctx.operatorId} tool=${entry.toolName} → rejected`);
+    // ★ M15（阶段5b）：fail-closed——wecomBossUserId 未配置或 operatorId 取不到 → 一律拒绝。
+    //   旧写法三个条件 &&（未配置任一即整条跳过校验）= fail-open，文本审批变成无身份校验。
+    if (!deps.wecomBossUserId || !ctx?.operatorId || ctx.operatorId !== deps.wecomBossUserId) {
+      const reason = !deps.wecomBossUserId
+        ? "未配置老板身份（wecomBossUserId），企微审批不可用——请在 config 配置后重启。"
+        : !ctx?.operatorId
+          ? "无法确认操作者身份，企微审批仅限老板本人。"
+          : undefined;
+      if (reason) {
+        deps.logger?.warn?.(`企微文本审批拦截（fail-closed）：${reason} operator=${ctx?.operatorId ?? "unknown"} tool=${entry.toolName}`);
+      } else {
+        deps.logger?.warn?.(`企微文本审批被非老板拦截 operator=${ctx?.operatorId} tool=${entry.toolName} → rejected`);
+      }
       entry.settle("rejected");
-      void Promise.resolve(deps.sendText(chatId, "🔐 审批仅限老板本人操作，已拒绝该请求。")).catch(() => void 0);
+      void Promise.resolve(deps.sendText(chatId, reason ?? "🔐 审批仅限老板本人操作，已拒绝该请求。")).catch(() => void 0);
       return true;
     }
     const decision = parseApprovalTextAnswer(text);
@@ -384,11 +413,11 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
         entry.settle("rejected");
         break;
       case "session":
-        memory.addSession(chatId, entry.toolName);
+        memory.addSession(chatId, entry.toolName, ctx?.operatorId); // ★ G6：绑定批准者（老板，M15 已校验）
         entry.settle("allowed-once");
         break;
       case "always":
-        memory.addAlways(chatId, entry.toolName);
+        memory.addAlways(chatId, entry.toolName, ctx?.operatorId); // ★ G6：绑定批准者
         entry.settle("allowed-once");
         break;
     }

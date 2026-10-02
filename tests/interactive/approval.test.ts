@@ -101,13 +101,13 @@ describe("approval answer（waterfall）", () => {
     expect(settled).toBe(false);
   });
 
-  it("Always 记忆命中 → 直接 allowed-once，不发卡", async () => {
-    const { bridge, sendCard } = mkBridge();
-    // 先建立 always 记忆（走一次 always 决策）
+  it("Always 记忆命中 → 直接 allowed-once，不发卡（★5b G6：p2p chatId≡批准者才命中）", async () => {
+    const { bridge, sendCard } = mkBridge({ bossOpenId: "oc_1" });
+    // 先建立 always 记忆（走一次 always 决策；决策者=chatId 归属者）
     const p = bridge.answer(req() as any, next as any);
     const entryId = /approval:(a\d+_\d+)/.exec(JSON.stringify(sendCard.mock.calls[0][1]) ?? "")?.[1];
     expect(entryId).toBeDefined();
-    const consumed = bridge.onCardAction("oc_1", `approval:${entryId}:always`, "ou_1");
+    const consumed = bridge.onCardAction("oc_1", `approval:${entryId}:always`, "oc_1");
     expect(consumed).toBe(true);
     expect(await p).toBe("allowed-once");
     // 再次请求同 chat+tool → 不发卡直接放行
@@ -117,11 +117,11 @@ describe("approval answer（waterfall）", () => {
     expect(await p2).toBe("allowed-once");
   });
 
-  it("Session 记忆命中 → 本会话同 tool 直接放行", async () => {
-    const { bridge, sendCard } = mkBridge();
+  it("Session 记忆命中 → 本会话同 tool 直接放行（★5b G6：绑定批准者）", async () => {
+    const { bridge, sendCard } = mkBridge({ bossOpenId: "oc_1" });
     const p = bridge.answer(req() as any, next as any);
     const entryId = /approval:(a\d+_\d+)/.exec(JSON.stringify(sendCard.mock.calls[0][1]) ?? "")?.[1];
-    bridge.onCardAction("oc_1", `approval:${entryId}:session`, "ou_1");
+    bridge.onCardAction("oc_1", `approval:${entryId}:session`, "oc_1");
     expect(await p).toBe("allowed-once");
     sendCard.mockClear();
     const p2 = bridge.answer(req() as any, next as any);
@@ -132,8 +132,9 @@ describe("approval answer（waterfall）", () => {
     const p3 = bridge.answer({ ...req(), agent: { id: "feishu:oc_2:1:0" } } as any, next as any);
     expect(sendCard).toHaveBeenCalledTimes(1);
     const entryId2 = /approval:(a\d+_\d+)/.exec(JSON.stringify(sendCard.mock.calls[0][1]) ?? "")?.[1];
-    bridge.onCardAction("oc_2", `approval:${entryId2}:allow-once`, "ou_1");
-    expect(await p3).toBe("allowed-once");
+    // ★5b M15：bossOpenId 只配了 oc_1 → oc_2 会话的"归属者"不是老板，点卡被拒（fail-closed）
+    bridge.onCardAction("oc_2", `approval:${entryId2}:allow-once`, "oc_2");
+    expect(await p3).toBe("rejected");
   });
 
   it("超时 → cancelled（fail-closed）", async () => {
@@ -193,13 +194,13 @@ describe("onCardAction（四按钮 + 老板限定）", () => {
     expect(sendText).toHaveBeenCalledWith("oc_1", expect.stringContaining("仅限老板本人操作"));
   });
 
-  it("未配置 bossOpenId → 不拦截（单用户宽松）+ warn 一次", async () => {
+  it("★5b M15：未配置 bossOpenId → fail-closed 拒绝 + 每次留痕（旧：恒放行+warn一次）", async () => {
     const { bridge, sendCard, logger } = mkBridge(); // 无 bossOpenId
     const p = bridge.answer(req() as any, next as any);
     const entryId = /approval:(a\d+_\d+)/.exec(JSON.stringify(sendCard.mock.calls[0][1]) ?? "")?.[1];
     const consumed = bridge.onCardAction("oc_1", `approval:${entryId}:allow-once`, "ou_anyone");
     expect(consumed).toBe(true);
-    expect(await p).toBe("allowed-once");
+    expect(await p).toBe("rejected"); // 旧实现 allowed-once
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("bossOpenId"));
   });
 
@@ -210,23 +211,23 @@ describe("onCardAction（四按钮 + 老板限定）", () => {
   });
 
   it("未知 decision → false", async () => {
-    const { bridge, sendCard } = mkBridge();
+    const { bridge, sendCard } = mkBridge({ bossOpenId: "oc_1" });
     const p = bridge.answer(req() as any, next as any);
     const entryId = /approval:(a\d+_\d+)/.exec(JSON.stringify(sendCard.mock.calls[0][1]) ?? "")?.[1];
-    const consumed = bridge.onCardAction("oc_1", `approval:${entryId}:maybe`, "ou_1");
+    const consumed = bridge.onCardAction("oc_1", `approval:${entryId}:maybe`, "oc_1");
     expect(consumed).toBe(false);
     expect(await p).toBe("cancelled"); // 超时兜底（decision 不认领，pending 仍在）
   });
 
-  it("always 决策 → 落盘 JSON（重启恢复）", async () => {
-    const { bridge, sendCard } = mkBridge();
+  it("always 决策 → 落盘 JSON（重启恢复）★5b G6：值为批准者列表", async () => {
+    const { bridge, sendCard } = mkBridge({ bossOpenId: "oc_1" });
     const p = bridge.answer(req() as any, next as any);
     const entryId = /approval:(a\d+_\d+)/.exec(JSON.stringify(sendCard.mock.calls[0][1]) ?? "")?.[1];
-    bridge.onCardAction("oc_1", `approval:${entryId}:always`, "ou_1");
+    bridge.onCardAction("oc_1", `approval:${entryId}:always`, "oc_1");
     expect(await p).toBe("allowed-once");
     expect(existsSync(memFile)).toBe(true);
     const raw = JSON.parse(readFileSync(memFile, "utf8"));
-    expect(raw["oc_1:bash"]).toContain("bash");
+    expect(raw["oc_1:bash"]).toContain("oc_1"); // ★ G6：值=批准者身份列表（旧=重复的 toolName）
   });
 });
 
@@ -315,31 +316,31 @@ describe("企微审批（platformOf = wecom）", () => {
   const wecom = () => "wecom" as const;
 
   it("发编号文本，不调 sendCard；回复 1 → allowed-once + 文本收口", async () => {
-    const { bridge, sendCard, updateCard, sendText } = mkBridge({ platformOf: wecom });
+    const { bridge, sendCard, updateCard, sendText } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng" });
     const p = bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
     await new Promise((r) => setTimeout(r, 0));
     expect(sendCard).not.toHaveBeenCalled();
     expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("1 = ✅ 允许一次"));
-    expect(bridge.onTextInbound("LiangXianSheng", "1", { chatType: "p2p" })).toBe(true);
+    expect(bridge.onTextInbound("LiangXianSheng", "1", { operatorId: "LiangXianSheng", chatType: "p2p" })).toBe(true);
     await expect(p).resolves.toBe("allowed-once");
     expect(updateCard).not.toHaveBeenCalled();
     expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("已允许"));
   });
 
   it("回复 4 → rejected", async () => {
-    const { bridge, sendText } = mkBridge({ platformOf: wecom });
+    const { bridge, sendText } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng" });
     const p = bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
     await new Promise((r) => setTimeout(r, 0));
-    expect(bridge.onTextInbound("LiangXianSheng", "4", { chatType: "p2p" })).toBe(true);
+    expect(bridge.onTextInbound("LiangXianSheng", "4", { operatorId: "LiangXianSheng", chatType: "p2p" })).toBe(true);
     await expect(p).resolves.toBe("rejected");
     expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("已拒绝"));
   });
 
   it("回复 3 → 永久记忆 + allowed-once（下次同工具不再问）", async () => {
-    const { bridge } = mkBridge({ platformOf: wecom });
+    const { bridge } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng" });
     const p = bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
     await new Promise((r) => setTimeout(r, 0));
-    expect(bridge.onTextInbound("LiangXianSheng", "3", { chatType: "p2p" })).toBe(true);
+    expect(bridge.onTextInbound("LiangXianSheng", "3", { operatorId: "LiangXianSheng", chatType: "p2p" })).toBe(true);
     await expect(p).resolves.toBe("allowed-once");
     // 记忆命中 → 第二次直接放行，且不再发文本
     const p2 = bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
@@ -347,7 +348,7 @@ describe("企微审批（platformOf = wecom）", () => {
   });
 
   it("群聊不消费文本审批（必须走卡片，防群成员代批）→ false 且保持待批", async () => {
-    const { bridge, logger } = mkBridge({ platformOf: wecom });
+    const { bridge, logger } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng" });
     void bridge.answer(req({ agent: { id: "feishu:wr_group:1:0" } }) as any, next);
     await new Promise((r) => setTimeout(r, 0));
     expect(bridge.onTextInbound("wr_group", "1", { chatType: "group" })).toBe(false);
@@ -355,10 +356,10 @@ describe("企微审批（platformOf = wecom）", () => {
   });
 
   it("识别不出的文本 → 不消费 + 提示重试（保持待批）", async () => {
-    const { bridge, sendText } = mkBridge({ platformOf: wecom });
+    const { bridge, sendText } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng" });
     void bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next);
     await new Promise((r) => setTimeout(r, 0));
-    expect(bridge.onTextInbound("LiangXianSheng", "?", { chatType: "p2p" })).toBe(false);
+    expect(bridge.onTextInbound("LiangXianSheng", "?", { operatorId: "LiangXianSheng", chatType: "p2p" })).toBe(false);
     expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("请回复 1-4"));
   });
 
@@ -367,11 +368,11 @@ describe("企微审批（platformOf = wecom）", () => {
     void bridge.answer(req() as any, next);
     await new Promise((r) => setTimeout(r, 0));
     expect(sendCard).toHaveBeenCalledTimes(1);
-    expect(bridge.onTextInbound("oc_1", "1", { chatType: "p2p" })).toBe(false);
+    expect(bridge.onTextInbound("oc_1", "1", { operatorId: "LiangXianSheng", chatType: "p2p" })).toBe(false);
   });
 
   it("企微发送失败 → unavailable（fail-closed）", async () => {
-    const { bridge } = mkBridge({ platformOf: wecom, sendText: vi.fn().mockRejectedValue(new Error("boom")) });
+    const { bridge } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng", sendText: vi.fn().mockRejectedValue(new Error("boom")) });
     await expect(bridge.answer(req({ agent: { id: "feishu:LiangXianSheng:1:0" } }) as any, next)).resolves.toBe("unavailable");
   });
 
@@ -391,12 +392,12 @@ describe("企微审批（platformOf = wecom）", () => {
   });
 
   it("★ wecom: 前缀会话的审批也走文本通道（此前认不出会话 → 丢给 GUI）", async () => {
-    const { bridge, sendCard, sendText } = mkBridge({ platformOf: wecom });
+    const { bridge, sendCard, sendText } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng" });
     const p = bridge.answer(req({ agent: { id: "wecom:LiangXianSheng:9a9d88770830:0" } }) as any, next);
     await new Promise((r) => setTimeout(r, 0));
     expect(sendCard).not.toHaveBeenCalled();
     expect(sendText).toHaveBeenCalledWith("LiangXianSheng", expect.stringContaining("1 = ✅ 允许一次"));
-    expect(bridge.onTextInbound("LiangXianSheng", "1", { chatType: "p2p" })).toBe(true);
+    expect(bridge.onTextInbound("LiangXianSheng", "1", { operatorId: "LiangXianSheng", chatType: "p2p" })).toBe(true);
     await expect(p).resolves.toBe("allowed-once");
   });
 });
