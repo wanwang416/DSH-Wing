@@ -112,11 +112,15 @@ export function createSender(deps: SenderDeps) {
       if (!messageId) throw new Error(`sendCardKitCard 未返回 message_id. ${JSON.stringify(res).slice(0, 200)}`);
       return { messageId, cardId };
     },
-    /** ★ M3 任务 2：CardKit 流式更新 main_text 元素（打字机动画） */
-    async streamCardContent(cardId: string, content: string, sequence: number): Promise<unknown> {
+    /** ★ M3 任务 2：CardKit 流式更新 main_text 元素（打字机动画）
+     *  ★ M9（2026-10-02）：sequence 支持传工厂函数——重试闭包内每次真实 PUT 取新值（严格递增），
+     *    旧实现固定值重试被平台以 sequence 非递增拒绝。 */
+    async streamCardContent(cardId: string, content: string, sequence: number | (() => number)): Promise<unknown> {
       const c = client();
       if (!c?.streamMessageContent) throw new Error("lark 客户端未就绪（无 streamMessageContent）");
-      return withRetry(() => c.streamMessageContent!(cardId, content, sequence));
+      return withRetry(() =>
+        c.streamMessageContent!(cardId, content, typeof sequence === "function" ? sequence() : sequence),
+      );
     },
     /** 添加表情回应 */
     async addReaction(messageId: string, emojiType: string): Promise<unknown> {

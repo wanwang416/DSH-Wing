@@ -297,12 +297,17 @@ describe("StreamingCard（cardkit 模式）", () => {
     expect(sender.updateCard).toHaveBeenCalled();
   });
 
-  it("cardkit.create 成功 → addText 走 cardkit.stream（sequence 递增）", async () => {
+  it("cardkit.create 成功 → addText 走 cardkit.stream（sequence 工厂，M9 新契约）", async () => {
     const cardkit = makeCardkit();
     const { sender, card } = setup(cardkit);
     await card.addText("打字机文本");
     expect(cardkit.create).toHaveBeenCalledWith("oc_1", expect.any(String));
-    expect(cardkit.stream).toHaveBeenCalledWith("c_1", "打字机文本", 1);
+    // ★ M9（2026-10-02）：旧行为传固定数字 sequence（重试复用被平台拒绝）已被有意废弃；
+    //   新契约传工厂函数，每次真实 PUT 取新值（streaming-card-stage3.test.ts 验证递增）
+    const streamMock = cardkit.stream.mock.calls[0] as unknown[];
+    expect(streamMock[0]).toBe("c_1");
+    expect(streamMock[1]).toBe("打字机文本");
+    expect(typeof streamMock[2]).toBe("function");
     expect(sender.updateCard).not.toHaveBeenCalled();
   });
 

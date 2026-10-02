@@ -160,10 +160,11 @@ export interface StreamingCardDeps {
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
   /** 降级回调：卡片不可用时回退普通消息 */
   onFallback?(chatId: string, text: string): Promise<void>;
-  /** ★ M3 任务 2：CardKit 流式能力（可选；无则纯 updateMessage 降级） */
+  /** ★ M3 任务 2：CardKit 流式能力（可选；无则纯 updateMessage 降级）
+   *  ★ M9：sequence 支持 number 或工厂（工厂 = 每次真实 PUT 取新值，重试安全） */
   cardkit?: {
     create(chatId: string, cardJson: string): Promise<{ messageId: string; cardId: string }>;
-    stream(cardId: string, content: string, sequence: number): Promise<unknown>;
+    stream(cardId: string, content: string, sequence: number | (() => number)): Promise<unknown>;
   };
 }
 
@@ -200,6 +201,8 @@ export class StreamingCard implements StreamCardHandle {
   private lastStreamAt = 0;
   private lastStreamText = "";
   private failed = false;
+  /** ★ M10：收尾标志——finalize 后拒绝一切迟到 PATCH（防事后改写 + onFallback 重复发文本） */
+  private closed = false;
 
   // ★ M3 修复：addThinking 防抖合并：避免 reasoning 每小段都 PATCH，短时间多 chunk 合并
   private thinkingTimeout: NodeJS.Timeout | null = null;
@@ -311,12 +314,16 @@ export class StreamingCard implements StreamCardHandle {
     }
   }
 
-  /** CardKit PUT 串行化：sequence 单调递增，避免并发竞争（对齐基底 mutex） */
+  /** CardKit PUT 串行化：sequence 单调递增，避免并发竞争（对齐基底 mutex）
+   *  ★ M9（2026-10-02）：sequence 以工厂传入——自增发生在 sender 层 withRetry 的**每次真实 PUT**内，
+   *    旧实现在此处自增一次、重试复用同一 sequence → 全部被平台拒绝。 */
   private streamContent(content: string): Promise<unknown> {
     const task = this.streamQueue.then(() => {
       if (!this.deps.cardkit || !this._cardId) throw new Error("cardkit 不可用");
-      this.sequence += 1;
-      return this.deps.cardkit.stream(this._cardId!, content, this.sequence);
+      return this.deps.cardkit.stream(this._cardId!, content, () => {
+        this.sequence += 1;
+        return this.sequence;
+      });
     });
     this.streamQueue = task.catch(() => void 0);
     return task;
@@ -328,6 +335,7 @@ export class StreamingCard implements StreamCardHandle {
    * 失败降级链：cardkit 模式 → inline updateMessage → text（onFallback）
    */
   private async patchFull(): Promise<void> {
+    if (this.closed) return; // ★ M10：收尾后拒绝迟到 PATCH（防事后改写 + onFallback 重复发文本）
     if (!(await this.ensureCreated())) return;
     const currentLen = this.contentLength();
     const lenDiff = Math.abs(currentLen - this.lastPatchLength);
@@ -408,7 +416,7 @@ export class StreamingCard implements StreamCardHandle {
 
   /** 全局防抖调度：短时间多个面板更新合并为一次全量PATCH */
   private schedulePatch(): void {
-    if (this.failed) return;
+    if (this.failed || this.closed) return; // ★ M10：closed 后不再调度
     if (this.updateTimeout) clearTimeout(this.updateTimeout);
     this.updateTimeout = setTimeout(() => {
       this.patchFull();
@@ -417,7 +425,7 @@ export class StreamingCard implements StreamCardHandle {
 
   /** 思考流式累积（reasoning-delta）→ 面板更新（全量） */
   async addThinking(delta: string): Promise<void> {
-    if (this.failed || !delta) return;
+    if (this.failed || this.closed || !delta) return; // ★ M10：closed 后只忽略
     const last = this.steps[this.steps.length - 1];
     if (last?.kind === "thinking") {
       last.summary = truncateText(last.summary + delta, THINKING_MAX_LEN);
@@ -435,7 +443,7 @@ export class StreamingCard implements StreamCardHandle {
 
   /** 回答流式累积（text-delta）→ main_text 打字机（★M4 恢复：patchAnswer 自带 1500ms/30字符节流；230020 限频根因是多工具连续调用，非回答流式） */
   async addText(delta: string): Promise<void> {
-    if (this.failed) return;
+    if (this.failed || this.closed) return; // ★ M10：closed 后拒绝迟到更新
     this.answer += delta;
     // await 打字机：确保首个 delta 等到卡片创建完成；节流命中时立即返回不阻塞
     await this.patchAnswer();
@@ -443,14 +451,14 @@ export class StreamingCard implements StreamCardHandle {
 
   /** 工具调用步骤（tool/call）→ Tools 面板新增一行 */
   async addTool(name: string, input?: string): Promise<void> {
-    if (this.failed) return;
+    if (this.failed || this.closed) return; // ★ M10
     this.steps.push({ kind: "tool", name, summary: input ?? "", done: false });
     this.schedulePatch();
   }
 
   /** 工具结果（tool/result）→ 更新对应步骤的 done/result（对齐基底 ToolStep.Done/Result） */
   async setToolResult(name: string, error?: unknown): Promise<void> {
-    if (this.failed) return;
+    if (this.failed || this.closed) return; // ★ M10
     // 找最后一个同 name 且未 done 的 tool 步骤
     let step: ToolStep | undefined;
     for (let i = this.steps.length - 1; i >= 0; i--) {
@@ -470,13 +478,27 @@ export class StreamingCard implements StreamCardHandle {
 
   /** 上下文注入（user/message source.kind !== "user"）→ Tools 面板新增 📥 行 */
   async addContext(text?: string): Promise<void> {
-    if (this.failed) return;
+    if (this.failed || this.closed) return; // ★ M10
     this.steps.push({ kind: "context", name: "上下文注入", summary: truncateText(text ?? "", 120), done: true });
     this.schedulePatch();
   }
 
+  /** ★ M10：统一收尾清理——清防抖定时器 + 置 closed，收尾入口必须调用 */
+  private closeForFinalize(): void {
+    this.closed = true;
+    if (this.updateTimeout) {
+      clearTimeout(this.updateTimeout);
+      this.updateTimeout = null;
+    }
+    if (this.thinkingTimeout) {
+      clearTimeout(this.thinkingTimeout);
+      this.thinkingTimeout = null;
+    }
+  }
+
   /** 最终回答（assistant/message）：完整卡片落地 */
   async finalize(answer: string): Promise<void> {
+    this.closeForFinalize(); // ★ M10：无论走哪条分支，先停掉在途防抖
     if (this.failed) {
       if (answer && answer.trim() !== "" && answer.trim() !== "No response.") {
         await this.deps.onFallback?.(this.chatId, answer);
@@ -505,6 +527,7 @@ export class StreamingCard implements StreamCardHandle {
    * @returns true=结果卡已发出；false=无正文或已降级 text
    */
   async finalizeToNewCard(answer: string): Promise<boolean> {
+    this.closeForFinalize(); // ★ M10：无论走哪条分支，先停掉在途防抖
     const text = (answer ?? "").trim();
     if (!text || text === "No response.") return false;
     // 主过程卡已废 → 结果直接降级普通文本（不再尝试卡片）
@@ -517,11 +540,28 @@ export class StreamingCard implements StreamCardHandle {
     if (this.deps.cardkit) {
       try {
         const res = await this.deps.cardkit.create(this.chatId, json);
-        await this.deps.cardkit.stream(res.cardId, text, 1);
-        return true;
+        // ★ M8（2026-10-02）：create 成功 = 卡片已真正发出（json 本身已含全文）。
+        //   stream 失败只做原地重试（sequence 递增），绝不 fall through 新建 inline 卡 → 治同屏双卡。
+        try {
+          await this.deps.cardkit.stream(res.cardId, text, 1);
+          return true;
+        } catch (err2) {
+          this.deps.logger?.warn?.(
+            `结果卡 CardKit 流式失败（卡片已创建，原地重试 1 次）: ${err2 instanceof Error ? err2.message : String(err2)}`,
+          );
+          try {
+            await this.deps.cardkit.stream(res.cardId, text, 2);
+            return true;
+          } catch (err3) {
+            this.deps.logger?.warn?.(
+              `结果卡 CardKit 流式重试仍失败（占位卡已含全文，保留不重复发卡）: ${err3 instanceof Error ? err3.message : String(err3)}`,
+            );
+            return true;
+          }
+        }
       } catch (err) {
         this.deps.logger?.warn?.(`结果卡 CardKit 失败，降级 inline: ${err instanceof Error ? err.message : String(err)}`);
-        // fall through → inline
+        // fall through → inline（create 失败 = 卡片未发出，此处降级是正确的）
       }
     }
     // 2) inline：sendCard 新建单 markdown 卡（全新 message_id，独立于过程卡）
