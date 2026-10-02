@@ -347,12 +347,17 @@ describe("企微审批（platformOf = wecom）", () => {
     await expect(p2).resolves.toBe("allowed-once");
   });
 
-  it("群聊不消费文本审批（必须走卡片，防群成员代批）→ false 且保持待批", async () => {
-    const { bridge, logger } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng" });
-    void bridge.answer(req({ agent: { id: "feishu:wr_group:1:0" } }) as any, next);
+  it("★5b-2 M5：群聊老板回编号 → 命中并结算；非老板决策 → 拒绝（fail-closed，防代批语义保留）", async () => {
+    const { bridge, sendText } = mkBridge({ platformOf: wecom, wecomBossUserId: "LiangXianSheng" });
+    const p = bridge.answer(req({ agent: { id: "feishu:wr_group:1:0" } }) as any, next);
     await new Promise((r) => setTimeout(r, 0));
-    expect(bridge.onTextInbound("wr_group", "1", { chatType: "group" })).toBe(false);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("非私聊"));
+    // 从群聊提示文本里提取编号（★M6 后提示必须带编号）
+    const sentText = String(sendText.mock.calls[0]?.[1] ?? "");
+    const entryId = /编号[:：\s]*([A-Za-z0-9_]+)/.exec(sentText)?.[1];
+    expect(entryId).toBeDefined();
+    // 老板在群里带编号回复 → 命中并结算
+    expect(bridge.onTextInbound("wr_group", `编号 ${entryId} 1`, { operatorId: "LiangXianSheng", chatType: "group" })).toBe(true);
+    await expect(p).resolves.toBe("allowed-once");
   });
 
   it("识别不出的文本 → 不消费 + 提示重试（保持待批）", async () => {

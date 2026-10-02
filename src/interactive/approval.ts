@@ -22,10 +22,12 @@ import { chatIdFromSessionId } from "../session/mapper.js";
 
 export interface ApprovalMemoryDeps {
   file: string;
+  logger?: { info?(m: string): void; warn?(m: string): void };
 }
 
 /** 审批记忆（Session 内存 / Always 落盘 JSON）★ G6（阶段5b）：键绑定批准者身份，只对同一批准者自动放行 */
 export function createApprovalMemory(deps: ApprovalMemoryDeps) {
+  const log = deps.logger;
   // Session 记忆（进程内存）：键 = chatId:toolName:operatorId —— 只对同一批准者生效
   const session = new Set<string>();
   // Always 记忆（落盘）：{ "chatId:toolName": [operatorId...] } —— 记录"该工具由谁永久放行"
@@ -43,11 +45,20 @@ export function createApprovalMemory(deps: ApprovalMemoryDeps) {
   } catch {
     always = new Map();
   }
+  // ★ M14（阶段5b-2）：tmp + rename 原子写（照抄 dedup.ts / permission-overrides.ts 同一套写法）——
+  //   写一半被杀/磁盘满 → 原文件不被破坏，旧记忆不丢；失败 warn 留痕（不静默）
   const persist = (): void => {
+    const tmp = `${deps.file}.tmp`;
     try {
-      writeFileSync(deps.file, JSON.stringify(Object.fromEntries([...always].map(([k, v]) => [k, [...v]])), null, 2), { mode: 0o600 });
-    } catch {
-      // 忽略
+      writeFileSync(tmp, JSON.stringify(Object.fromEntries([...always].map(([k, v]) => [k, [...v]])), null, 2), { mode: 0o600 });
+      renameSync(tmp, deps.file);
+    } catch (err) {
+      log?.warn?.(`审批记忆落盘失败（原文件保留）：${err instanceof Error ? err.message : String(err)}`);
+      try {
+        if (existsSync(tmp)) rmSync(tmp);
+      } catch {
+        // 清理失败不致命
+      }
     }
   };
   const key = (chatId: string, toolName: string, operatorId?: string): string =>
@@ -87,6 +98,12 @@ export interface ApprovalBridgeDeps {
   sendText(chatId: string, text: string): unknown;
   /** 老板 open_id（WingConfig.bossOpenId；未配置 → 单用户宽松 + warn 一次，拍板④强校验依赖配置） */
   bossOpenId?: string;
+  /**
+   * ★ G6-B（阶段5b-2，ALAN 拍板 B 方案）：当前 turn 发起者快照（chatId → senderOpenId）。
+   *   群聊 Always 记忆只对当初点它的那个人生效：老板在群里点过 Always 后，老板自己触发免问，他人照样审批。
+   *   拿不到快照 → undefined → 记忆不自动放行（fail-closed，安全侧退化）。
+   */
+  initiatorOf?(chatId: string): string | undefined;
   /** 审批超时 ms（默认 turnTimeoutMs 同源；超时 → cancelled） */
   timeoutMs?: number;
   logger?: { info?(m: string): void; warn?(m: string): void };
@@ -180,12 +197,14 @@ export function buildApprovalText(opts: { entryId: string; toolName: string; rea
     `⚠️ ${opts.toolName} 请求执行`,
     opts.reason ?? "（无说明）",
     ``,
+    `（本次审批编号：${opts.entryId}）`,
     `请回复数字决定：`,
     `1 = ✅ 允许一次（仅本次）`,
     `2 = 🕐 本会话允许（同工具不再问）`,
     `3 = ♾️ 永久允许（写盘记忆）`,
     `4 = ❌ 拒绝`,
     ``,
+    `多条审批并存时，请带编号回复（例：编号 ${opts.entryId} 1）`,
     `（回复其他内容视为未决，超时自动失效）`,
   ].join("\n");
 }
@@ -213,7 +232,7 @@ export function parseApprovalTextAnswer(text: string): "allow-once" | "session" 
 
 export function createApprovalBridge(deps: ApprovalBridgeDeps) {
   const pending = new Map<string, PendingEntry>();
-  const memory = createApprovalMemory({ file: deps.memoryFile });
+  const memory = createApprovalMemory({ file: deps.memoryFile, logger: deps.logger });
   let entryCounter = 0;
 
   const isBoss = (openId: string | undefined): boolean => {
@@ -231,10 +250,12 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
     if (!chatId) return next(); // 非本插件 agent，让其他 answerer
 
     // 记忆命中（Always/Session）→ 直接放行，不发卡
-    // ★ G6（阶段5b）最终口径：记忆**只对同一批准者**自动放行。answer 阶段请求发起者身份 =
-    //   该 chat 的归属者（p2p chatId ≡ 用户 openId/userid，由 parser 保证），把它传给记忆层核对。
-    if (memory.shouldAutoAllow(chatId, req.toolName, chatId)) {
-      deps.logger?.info?.(`审批记忆命中（always）chat=${chatId} tool=${req.toolName} → allowed-once`);
+    // ★ G6-B（阶段5b-2，ALAN 拍板）：发起者身份 = initiatorOf 快照（turn 开始时记录的发送者）；
+    //   快照缺失 → p2p 回退用 chatId（≡归属者，parser 保证），群聊拿不到 → undefined → 不自动放行（fail-closed）。
+    //   旧口径（5b-1）= 群聊用 chatId 顶替 → 永不命中；B 口径 = 老板在群里点 Always 后老板免问。
+    const initiator = deps.initiatorOf?.(chatId) ?? chatId;
+    if (memory.shouldAutoAllow(chatId, req.toolName, initiator)) {
+      deps.logger?.info?.(`审批记忆命中（always）chat=${chatId} tool=${req.toolName} initiator=${initiator} → allowed-once`);
       return "allowed-once";
     }
 
@@ -250,10 +271,14 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
       let sendCardDone: Promise<void> = Promise.resolve();
       // timer 先声明（settle 闭包引用；TDZ 安全——settle 只在事件回调/超时/abort 时被调，彼时已赋值）
       let timer: ReturnType<typeof setTimeout> | undefined;
+      // ★ M42（阶段5b-2）：持 abort 监听引用，settle 时主动摘除——abort 一直不来时监听随 signal
+      //   常驻内存（每个 pending 一份），settle 后不再需要
+      const onAbort = (): void => settle("cancelled");
       const settle = (outcome: ApprovalOutcome): void => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        if (req.signal) req.signal.removeEventListener("abort", onAbort); // ★ M42
         pending.delete(entryId);
         // ★ Bug3b：收口——把原四按钮卡替换成状态卡（✅已允许/❌已拒绝/⏰已失效），不再停留可操作界面
         // ★ M16（阶段5b）：settle 先等"发卡完成"，再按已回填的 message_id 刷终态——
@@ -281,7 +306,7 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
       //   ② 超时窗口含发送过程，维持原「发卡后立即计时」语义）
       timer = setTimeout(() => settle("cancelled"), deps.timeoutMs ?? 300_000);
       timer.unref?.();
-      req.signal?.addEventListener("abort", () => settle("cancelled"), { once: true });
+      req.signal?.addEventListener("abort", onAbort, { once: true }); // ★ M42：监听持引用，settle 时摘除
       try {
         if (textMode) {
           // ★ 2026-10-01 企微线路：无模板卡片 API → 发编号文本审批（回复 1-4 决策，见 onTextInbound）
@@ -364,26 +389,68 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
 
   /**
    * ★ 2026-10-01 企微线路：文本审批回执（企微无卡片 API，用编号回复决策）。
-   * 安全约束（拍板④）：仅接受**私聊**（chatType=p2p）的文本审批；群聊必须走卡片，
-   *   避免群成员代批。识别不出决策时不消费（消息照常进 agent），但回一条提示。
+   * ★ M5（阶段5b-2）：群聊文本审批命中修复——旧实现硬拒群聊（chatType !== "p2p" 直接 return），
+   *   群里发的提示永远无法被回复命中。现改为：群聊也消费，但**身份校验照旧 fail-closed**
+   *   （operatorId 必须 === wecomBossUserId，非老板/未配置 → 拒绝），防群成员代批不放松。
+   * ★ M6（阶段5b-2）：不再取"第一个 pending"——优先按回复中的编号（entryId）精确匹配；
+   *   带编号但匹配不到 → 不结算任何审批 + 提示（fail-closed 不猜）；不带编号且该 chat 仅一条
+   *   pending → 兼容旧行为；不带编号且多条并存 → 提示带编号重发，不猜。
    * @returns true=已消费该消息（index.ts 不再当普通消息注入 agent）
    */
   function onTextInbound(chatId: string, text: string, ctx?: { operatorId?: string; chatType?: "p2p" | "group" }): boolean {
+    if (deps.platformOf?.(chatId) !== "wecom") return false; // 飞书走卡片按钮，不抢文本
+    // ★ M6：解析"编号 <entryId> <决策>"（兼容"编号：xxx 1"/纯决策两种写法）
+    const withId = /编号[:：\s]*([A-Za-z0-9_]+)\s*(.*)/.exec(text.trim());
+    const decisionText = withId ? (withId[2]?.trim() || text.trim()) : text.trim();
+    const decision = parseApprovalTextAnswer(decisionText);
+
+    // 定位目标审批：优先编号精确匹配；否则（无编号）限定同 chat 的 pending
     let entry: PendingEntry | undefined;
-    for (const e of pending.values()) {
-      if (e.chatId === chatId) {
-        entry = e;
-        break;
+    let entryId: string | undefined;
+    if (withId) {
+      const wanted = withId[1]!;
+      for (const [id, e] of pending) {
+        if (id === wanted) {
+          // 编号是全局唯一的：连 chatId 都对不上 = 拿别的会话的审批编号来冒充 → 不结算（不猜）
+          if (e.chatId !== chatId) {
+            deps.logger?.warn?.(`企微文本审批：编号属于其他会话，拒绝处理 entry=${wanted} chat=${chatId}`);
+            void Promise.resolve(deps.sendText(chatId, `⚠️ 编号不匹配：该编号不属于本会话的审批，请核对本会话审批提示里的编号。`)).catch(() => void 0);
+            return true;
+          }
+          entry = e;
+          entryId = id;
+          break;
+        }
+      }
+      if (!entry) {
+        // 带编号但找不到 → 不猜，不结算任何 pending（fail-closed）
+        deps.logger?.warn?.(`企微文本审批：编号不存在（可能已收口/超时），不结算任何审批 entry=${wanted} chat=${chatId}`);
+        void Promise.resolve(deps.sendText(chatId, `⚠️ 编号不匹配：未找到该编号的待审批请求（可能已收口或超时）。`)).catch(() => void 0);
+        return true;
+      }
+    } else {
+      const mine = [...pending.entries()].filter(([, e]) => e.chatId === chatId);
+      if (mine.length === 1) {
+        entryId = mine[0]![0];
+        entry = mine[0]![1];
+      } else if (mine.length > 1) {
+        deps.logger?.warn?.(`企微文本审批：${mine.length} 条审批并存且回复未带编号，不猜——请带编号回复 chat=${chatId}`);
+        void Promise.resolve(deps.sendText(chatId, `⚠️ 当前有 ${mine.length} 条待审批，为避免串台请带编号回复（例：编号 ${mine[0]![0]} 1）。`)).catch(() => void 0);
+        return true;
+      } else {
+        return false; // 该 chat 无 pending，与审批无关
       }
     }
-    if (!entry) return false;
-    if (deps.platformOf?.(chatId) !== "wecom") return false; // 飞书走卡片按钮，不抢文本
-    if (ctx?.chatType !== undefined && ctx.chatType !== "p2p") {
-      deps.logger?.warn?.(`企微文本审批未消费（非私聊 chatType=${ctx.chatType}）chat=${chatId} tool=${entry.toolName}`);
+
+    // ★ M15/M5（阶段5b-2 保持）：fail-closed——wecomBossUserId 未配置或 operatorId 取不到 → 一律拒绝。
+    //   群聊场景同样走这里（M5 修复后群聊也能到这行），身份不匹配的群成员回复会被拒绝并留痕。
+    //   ★ 顺序（阶段5b-2 修正）：身份校验在"决策识别"之后——群里非老板的**非决策闲聊**不得把
+    //     老板的审批打成 rejected（恶意否决也是干预）；只有"明确做出决策"且身份不对才拒绝。
+    if (decision === undefined) {
+      deps.logger?.info?.(`企微文本审批：未识别回复（保持待批）chat=${chatId} text="${text.slice(0, 20)}"`);
+      void Promise.resolve(deps.sendText(chatId, "⚠️ 有待审批请求，请回复 1-4 决定（多条并存请带编号；其他内容已照常转给助手）。")).catch(() => void 0);
       return false;
     }
-    // ★ M15（阶段5b）：fail-closed——wecomBossUserId 未配置或 operatorId 取不到 → 一律拒绝。
-    //   旧写法三个条件 &&（未配置任一即整条跳过校验）= fail-open，文本审批变成无身份校验。
     if (!deps.wecomBossUserId || !ctx?.operatorId || ctx.operatorId !== deps.wecomBossUserId) {
       const reason = !deps.wecomBossUserId
         ? "未配置老板身份（wecomBossUserId），企微审批不可用——请在 config 配置后重启。"
@@ -391,19 +458,13 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
           ? "无法确认操作者身份，企微审批仅限老板本人。"
           : undefined;
       if (reason) {
-        deps.logger?.warn?.(`企微文本审批拦截（fail-closed）：${reason} operator=${ctx?.operatorId ?? "unknown"} tool=${entry.toolName}`);
+        deps.logger?.warn?.(`企微文本审批拦截（fail-closed）：${reason} operator=${ctx?.operatorId ?? "unknown"} tool=${entry.toolName} chatType=${ctx?.chatType ?? "unknown"}`);
       } else {
-        deps.logger?.warn?.(`企微文本审批被非老板拦截 operator=${ctx?.operatorId} tool=${entry.toolName} → rejected`);
+        deps.logger?.warn?.(`企微文本审批被非老板拦截 operator=${ctx?.operatorId} tool=${entry.toolName} chatType=${ctx?.chatType ?? "unknown"} → rejected`);
       }
       entry.settle("rejected");
       void Promise.resolve(deps.sendText(chatId, reason ?? "🔐 审批仅限老板本人操作，已拒绝该请求。")).catch(() => void 0);
       return true;
-    }
-    const decision = parseApprovalTextAnswer(text);
-    if (decision === undefined) {
-      deps.logger?.info?.(`企微文本审批：未识别回复（保持待批）chat=${chatId} text="${text.slice(0, 20)}"`);
-      void Promise.resolve(deps.sendText(chatId, "⚠️ 有待审批请求，请回复 1-4 决定（其他内容已照常转给助手）。")).catch(() => void 0);
-      return false;
     }
     switch (decision) {
       case "allow-once":
@@ -413,15 +474,16 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
         entry.settle("rejected");
         break;
       case "session":
-        memory.addSession(chatId, entry.toolName, ctx?.operatorId); // ★ G6：绑定批准者（老板，M15 已校验）
+        memory.addSession(chatId, entry.toolName, ctx.operatorId); // ★ G6：绑定批准者（老板，M15 已校验）
         entry.settle("allowed-once");
         break;
       case "always":
-        memory.addAlways(chatId, entry.toolName, ctx?.operatorId); // ★ G6：绑定批准者
+        memory.addAlways(chatId, entry.toolName, ctx.operatorId); // ★ G6：绑定批准者
         entry.settle("allowed-once");
         break;
     }
-    deps.logger?.info?.(`企微文本审批决策 chat=${chatId} tool=${entry.toolName} decision=${decision}`);
+    void entryId; // 编号匹配已在上方完成，此处仅结算
+    deps.logger?.info?.(`企微文本审批决策 chat=${chatId} tool=${entry.toolName} decision=${decision} entry=${entryId}`);
     return true;
   }
 
@@ -431,4 +493,4 @@ export function createApprovalBridge(deps: ApprovalBridgeDeps) {
 export type ApprovalBridge = ReturnType<typeof createApprovalBridge>;
 
 // fs imports（放底部避免干扰类型导入可读性）
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";

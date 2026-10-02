@@ -384,6 +384,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
   // ---------- P1-1 审批卡（danger-full-access 危险操作审批；ALAN 拍板④：仅老板本人可点） ----------
   // approval/request waterfall：记忆命中 → 直接 allowed-once；否则弹四按钮审批卡
+  // ★ G6-B（阶段5b-2）：当前 turn 发起者快照（chatId → senderOpenId）。queued 分支 set、onTurnEnd 清除。
+  const turnInitiator = new Map<string, string>();
   const approvalBridge = createApprovalBridge({
     // ★ Bug3b：审批卡改直发 sender.sendCard（返回 SDK 响应 → 取 message_id → 决策后 updateCard 收口换状态卡）。
     //   原走 outbox（磁盘持久化重试）拿不到 message_id 无法收口；代价 = 断联重启不补发（对齐提问卡，Alan 拍板 2026-09-05）
@@ -398,6 +400,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
         payload: { kind: "text", text },
       }),
     bossOpenId: cfg.bossOpenId,
+    // ★ G6-B（阶段5b-2）：当前 turn 发起者快照（queued 分支 set、onTurnEnd 清除）——群聊 Always 记忆按批准者生效
+    initiatorOf: (chatId: string) => turnInitiator.get(chatId),
     timeoutMs: cfg.turnTimeoutMs,
     memoryFile: join(dir, "approval-memory.json"),
     // ★ 2026-10-01 企微线路：审批在企微降级为编号文本（复用与提问桥同一份线路判定）
@@ -527,7 +531,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
     onChunk: (chatId, text) => experience.onChunk(chatId, text),
     onThinking: (chatId, text) => experience.onThinking(chatId, text),
     onAssistantMessage: (chatId, text) => void experience.onAssistantMessage(chatId, text),
-    onTurnEnd: (chatId, reason) => void experience.onTurnEnd(chatId, reason),
+    onTurnEnd: (chatId, reason) => {
+      void experience.onTurnEnd(chatId, reason);
+      turnInitiator.delete(chatId); // ★ G6-B：turn 结束清快照，防下一 turn 误用旧发起者（新 turn 的 queued 会重新快照）
+    },
     onToolCall: (chatId, name, input) => void experience.onToolCall(chatId, name, input),
     onToolResult: (chatId, name, error) => void experience.onToolResult(chatId, name, error),
     onContext: (chatId, text) => void experience.onContext(chatId, text),
@@ -701,6 +708,11 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
       // b) queued → 只有新建轮次才进串行队列，保证单 chat 一次只跑一个轮次（和 DSH 原生一致）
       await serialQueue.enqueue(msg.chatId, async () => {
+        // ★ G6-B（阶段5b-2）：turn 开始时快照发起者身份（chatId → senderOpenId）——
+        //   群聊 Always 记忆只对当初点它的那个人生效。快照点在 queued（真正开 turn）处：
+        //   steered/插话不覆盖快照（A 触发 turn、B 插话排队时不会被误判成 B）。
+        //   turn 结束在 forwarder.onTurnEnd 里清除（防止跨 turn 误用旧身份）。
+        turnInitiator.set(msg.chatId, msg.userId);
         inboundWal.accept({
           messageId: msg.messageId,
           chatId: msg.chatId,
