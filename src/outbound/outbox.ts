@@ -144,8 +144,14 @@ export function createOutbox(deps: OutboxDeps) {
     // ★ P1-2B：段回收——seg-<秒级时间戳>.jsonl 按文件名时间判断（不逐段解析内容，
     //   基底 dsh-lark-link outbox.ts:179-189 同做法：段是全量快照，旧段记录已被新段覆盖）。
     //   安全护栏：只动 /^seg-\d+\.jsonl$/ 命名的文件；rmSync 失败打 warn 不抛出。
+    // ★ M46（2026-10-02 阿深收尾）：**最新段永不回收**。
+    //   段是全量快照，最新段携带所有信封的最新状态；若最新段也被删，则"停产 > retainDays
+    //   天 + 段内有 pending/sending"会让未发送消息连一次恢复机会都没有。
+    //   其余超期段的记录已被更晚的段覆盖，可安全回收。
+    const newestSeg = segs.length > 0 ? segs[segs.length - 1] : undefined;
     let removedSegs = 0;
     for (const seg of segs) {
+      if (seg === newestSeg) continue; // ★ M46：保留最新 1 段
       const segMs = Number(seg.slice(4, -6)) * 1000;
       if (nowMs - segMs > retainMs) {
         try {
@@ -156,7 +162,7 @@ export function createOutbox(deps: OutboxDeps) {
         }
       }
     }
-    if (removedSegs > 0) deps.logger?.info?.(`outbox 段回收：删除 ${removedSegs} 个旧段（>${retainDays} 天）`);
+    if (removedSegs > 0) deps.logger?.info?.(`outbox 段回收：删除 ${removedSegs} 个旧段（>${retainDays} 天，保留最新 1 段）`);
     const queued = new Set<string>(); // ★ P1-2C：跨段全局去重——同一信封多条历史行只回队一次
     for (const seg of segs) {
       if (!existsSync(join(deps.dir, seg))) continue; // 本轮刚被回收的段

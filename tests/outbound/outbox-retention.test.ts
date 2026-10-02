@@ -111,15 +111,19 @@ describe("outbox P1-2B：seg 段文件回收", () => {
   it("非 seg-<数字>.jsonl 命名的文件不删（安全护栏）", async () => {
     const dir = tmpDir();
     const oldSec = Math.floor((Date.now() - 8 * DAY) / 1000);
+    const newestOldSec = oldSec + 60; // ★ M46：需要两个超期段，"非最新段"才应被回收
     writeFileSync(join(dir, "seg-not-a-number.jsonl"), "x\n"); // 不匹配 seg-<数字>
     writeFileSync(join(dir, `seg-${oldSec}.jsonl`), "x\n");
+    writeFileSync(join(dir, `seg-${newestOldSec}.jsonl`), "x\n");
     writeFileSync(join(dir, "other-file.jsonl"), "x\n");
     const outbox = createOutbox({ dir, deliver: vi.fn().mockResolvedValue({ ok: true }), retainDays: 7 });
     await outbox.start();
     await sleep(50);
     expect(existsSync(join(dir, "seg-not-a-number.jsonl"))).toBe(true);
     expect(existsSync(join(dir, "other-file.jsonl"))).toBe(true);
+    // 超期且非最新 → 回收；超期但是最新 → 保留（M46）
     expect(existsSync(join(dir, `seg-${oldSec}.jsonl`))).toBe(false);
+    expect(existsSync(join(dir, `seg-${newestOldSec}.jsonl`))).toBe(true);
     await outbox.stop();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -132,6 +136,49 @@ describe("outbox P1-2B：seg 段文件回收", () => {
     await outbox.start();
     await sleep(50);
     expect(existsSync(join(dir, `seg-${recentSec}.jsonl`))).toBe(true);
+    await outbox.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("★ M46：全部段都超期时，最新段仍被保留（防未发送消息随段被删）", async () => {
+    const dir = tmpDir();
+    const nineDaysSec = Math.floor((Date.now() - 9 * DAY) / 1000);
+    const eightDaysSec = Math.floor((Date.now() - 8 * DAY) / 1000);
+    writeFileSync(join(dir, `seg-${nineDaysSec}.jsonl`), "x\n");
+    writeFileSync(join(dir, `seg-${eightDaysSec}.jsonl`), "x\n"); // 更晚 → 最新段
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const outbox = createOutbox({ dir, deliver: vi.fn().mockResolvedValue({ ok: true }), retainDays: 7, logger });
+    await outbox.start();
+    await sleep(50);
+    // 旧实现：两段都超期 → 都删；若段内有 pending，消息永久丢失（连"不回队"的兜底都轮不上）
+    expect(existsSync(join(dir, `seg-${nineDaysSec}.jsonl`))).toBe(false);
+    expect(existsSync(join(dir, `seg-${eightDaysSec}.jsonl`))).toBe(true); // ★ 最新段保留
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("保留最新 1 段"));
+    await outbox.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("★ M46：最新段被保留后，其内 pending 消息仍能被重建投递", async () => {
+    const dir = tmpDir();
+    const eightDaysSec = Math.floor((Date.now() - 8 * DAY) / 1000);
+    const env = {
+      id: "m46-pending",
+      dedupeKey: "k-m46",
+      chatId: "oc_1",
+      kind: "text",
+      payload: { kind: "text", text: "停产期未发完的消息" },
+      status: "pending",
+      attempts: 1,
+      createdAt: Date.now() - 8 * DAY,
+      updatedAt: Date.now() - 8 * DAY,
+    };
+    writeFileSync(join(dir, `seg-${eightDaysSec}.jsonl`), JSON.stringify(env) + "\n");
+    const deliver = vi.fn().mockResolvedValue({ ok: true });
+    const outbox = createOutbox({ dir, deliver, retainDays: 7 });
+    await outbox.start();
+    await sleep(120);
+    expect(existsSync(join(dir, `seg-${eightDaysSec}.jsonl`))).toBe(true); // 段没被删
+    expect(deliver).toHaveBeenCalledTimes(1); // pending 仍然被投递（不丢）
     await outbox.stop();
     rmSync(dir, { recursive: true, force: true });
   });
