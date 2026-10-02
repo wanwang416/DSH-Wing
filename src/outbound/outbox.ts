@@ -17,7 +17,7 @@
  *   8) describeError：平台返回对象序列化出 errcode/errmsg（不再 "[object Object]"）
  */
 
-import { appendFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -41,6 +41,8 @@ export interface OutboxDeps {
   deliver(env: OutboxEnvelope): Promise<{ ok: boolean; retryable?: boolean; error?: string }>;
   maxRetries?: number;
   retryDelayMs?: number;
+  /** P1-2A/2B：保留天数——超期 failed 不回队、超期 seg 段回收（基底 config.ts:128 retainDays: 7） */
+  retainDays?: number;
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
   /** 统计变化回调（状态面板用） */
   onStatsChange?(stats: { pending: number; failed: number }): void;
@@ -54,6 +56,9 @@ const DEFAULT_MAX_RETRIES = 50;
 const BACKOFF_MAX_MS = 60_000;
 /** P0-4：指数退避基数 */
 const BACKOFF_BASE_MS = 1_000;
+/** P1-2A/2B：保留天数缺省（基底 config.ts:128 retainDays: 7） */
+const DEFAULT_RETAIN_DAYS = 7;
+const RETAIN_MS = DEFAULT_RETAIN_DAYS * 86_400_000;
 
 /**
  * P0-4 第 8 点：错误可读化。平台 SDK 返回的对象（axios error 的 response.data、
@@ -124,6 +129,10 @@ export function createOutbox(deps: OutboxDeps) {
     envelopes.clear();
     queue.length = 0;
     sentKeys.clear();
+    const retainDays = deps.retainDays ?? DEFAULT_RETAIN_DAYS;
+    const retainMs = retainDays * 86_400_000;
+    const nowMs = Date.now();
+    let expiredSkipped = 0;
     let segs: string[] = [];
     try {
       segs = readdirSync(deps.dir)
@@ -132,10 +141,27 @@ export function createOutbox(deps: OutboxDeps) {
     } catch {
       segs = [];
     }
+    // ★ P1-2B：段回收——seg-<秒级时间戳>.jsonl 按文件名时间判断（不逐段解析内容，
+    //   基底 dsh-lark-link outbox.ts:179-189 同做法：段是全量快照，旧段记录已被新段覆盖）。
+    //   安全护栏：只动 /^seg-\d+\.jsonl$/ 命名的文件；rmSync 失败打 warn 不抛出。
+    let removedSegs = 0;
     for (const seg of segs) {
+      const segMs = Number(seg.slice(4, -6)) * 1000;
+      if (nowMs - segMs > retainMs) {
+        try {
+          rmSync(join(deps.dir, seg));
+          removedSegs += 1;
+        } catch (err) {
+          deps.logger?.warn?.(`outbox 段回收失败（${seg}）: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+    if (removedSegs > 0) deps.logger?.info?.(`outbox 段回收：删除 ${removedSegs} 个旧段（>${retainDays} 天）`);
+    const queued = new Set<string>(); // ★ P1-2C：跨段全局去重——同一信封多条历史行只回队一次
+    for (const seg of segs) {
+      if (!existsSync(join(deps.dir, seg))) continue; // 本轮刚被回收的段
       try {
         const lines = readFileSync(join(deps.dir, seg), "utf8").split("\n").filter(Boolean);
-        const queued = new Set<string>(); // 同一信封多条历史行只回队一次
         for (const line of lines) {
           try {
             const env = JSON.parse(line) as OutboxEnvelope;
@@ -144,12 +170,18 @@ export function createOutbox(deps: OutboxDeps) {
               // ★ P0-4 第 1 点：只有 done 才进 sentKeys（"已终结"）。
               //   旧实现 failed 也进 → enqueue 幂等拦截 + 不回队 → 消息永久消失。
               sentKeys.add(env.dedupeKey);
+            } else if (env.status === "failed" && nowMs - env.createdAt > retainMs) {
+              // ★ P1-2A：超期 failed 不回队（防"重启翻旧账"——ALAN 10-02 重启时
+              //   3 条 9/15、9/17 的残留消息被重发到飞书/企微，用户收到 15 天前的旧消息）。
+              //   保持 failed（不删除，数据留在 seg 文件里），打 warn 汇总计数。
+              //   对齐基底 config.ts:128 retainDays: 7。
+              expiredSkipped += 1;
             } else if (env.status === "pending" || env.status === "failed") {
-              // ★ P0-4 第 2 点：重启时 failed 回队重试（基底 outbox.ts:126-131：
+              // ★ P0-4 第 2 点：重启时未超期 failed 回队重试（基底 outbox.ts:126-131：
               //   pending/failed/sending 都 lane.push）。failed 必须重置为 pending，
               //   否则 pump 循环见到 status=failed 直接跳过（回队形同虚设）。
               env.status = "pending";
-              env.updatedAt = Date.now();
+              env.updatedAt = nowMs;
               if (!queued.has(env.id)) {
                 queued.add(env.id);
                 queue.push(env.id);
@@ -157,8 +189,11 @@ export function createOutbox(deps: OutboxDeps) {
             } else {
               // sending：重启时视为 pending 重投（at-least-once）
               env.status = "pending";
-              env.updatedAt = Date.now();
-              queue.push(env.id);
+              env.updatedAt = nowMs;
+              if (!queued.has(env.id)) {
+                queued.add(env.id);
+                queue.push(env.id);
+              }
             }
           } catch {
             // 跳过坏行
@@ -168,7 +203,12 @@ export function createOutbox(deps: OutboxDeps) {
         // 跳过坏文件
       }
     }
-    deps.logger?.info?.(`outbox 重建：${envelopes.size} 条信封，${queue.length} 条待发送`);
+    if (expiredSkipped > 0) {
+      deps.logger?.warn?.(`outbox 重建：跳过 ${expiredSkipped} 条超期 failed（>${retainDays} 天，不回队不删除）`);
+    }
+    // ★ P1-2C（体检 M45）：文案区分信封数与队列条数——旧实现同一 id 多行重复入队，
+    //   实测出现过「12 条信封，21 条待发送」（队列条目 > 唯一信封数），计数误导。
+    deps.logger?.info?.(`outbox 重建：${envelopes.size} 条信封，队列 ${queue.length} 条（唯一 id ${queued.size}）`);
   }
 
   function enqueue(input: {
