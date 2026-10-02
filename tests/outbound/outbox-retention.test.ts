@@ -218,3 +218,96 @@ describe("outbox P1-2C：重建队列去重 + 日志文案（体检 M45）", () 
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("outbox P2：M48 回收前 compaction + M47 基于最终状态入队", () => {
+  const mkEnv = (over: Record<string, unknown>) => ({
+    id: "env-x",
+    dedupeKey: "k-x",
+    chatId: "oc_1",
+    kind: "text",
+    payload: { kind: "text", text: "x" },
+    status: "pending",
+    attempts: 1,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    ...over,
+  });
+
+  it("★ M48：pending 信封的最后状态行只在超期段 → 回收后仍被投递（旧实现会随段消失）", async () => {
+    const dir = tmpDir();
+    const oldSec = Math.floor((Date.now() - 8 * DAY) / 1000);
+    const recentSec = Math.floor((Date.now() - 1 * DAY) / 1000);
+    // 超期段：待发信封（它的唯一一行就在这里）
+    writeFileSync(
+      join(dir, `seg-${oldSec}.jsonl`),
+      JSON.stringify(mkEnv({ id: "m48-pending", dedupeKey: "k-m48", createdAt: Date.now() - 8 * DAY })) + "\n",
+    );
+    // 最新段（不超期）：放一条无关的 done，确保超期段不是"最新段"（M46 只保最新段）
+    writeFileSync(
+      join(dir, `seg-${recentSec}.jsonl`),
+      JSON.stringify(mkEnv({ id: "other-done", dedupeKey: "k-other", status: "done" })) + "\n",
+    );
+    const deliver = vi.fn().mockResolvedValue({ ok: true });
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const outbox = createOutbox({ dir, deliver, retainDays: 7, logger });
+    await outbox.start();
+    await sleep(150);
+    // 旧实现：超期段被直接删 → 该信封随之消失 → deliver 一次都不会被调用（消息永久丢失）
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect((deliver.mock.calls[0][0] as { dedupeKey: string }).dedupeKey).toBe("k-m48");
+    // 回收前必须先写出全量快照段
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("回收前已写全量快照段"));
+    await outbox.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("★ M48：done 信封的行都在超期段 → 回收写快照后，二次重建不会回退成待发", async () => {
+    const dir = tmpDir();
+    const oldSec = Math.floor((Date.now() - 8 * DAY) / 1000);
+    const recentSec = Math.floor((Date.now() - 1 * DAY) / 1000);
+    const doneEnv = mkEnv({ id: "m48-done", dedupeKey: "k-m48-done", status: "done", createdAt: Date.now() - 8 * DAY });
+    // 同一条信封：pending 行 + done 行都在超期段里（真实历史写法）
+    writeFileSync(
+      join(dir, `seg-${oldSec}.jsonl`),
+      JSON.stringify(mkEnv({ ...doneEnv, status: "pending" })) + "\n" + JSON.stringify(doneEnv) + "\n",
+    );
+    writeFileSync(join(dir, `seg-${recentSec}.jsonl`), JSON.stringify(mkEnv({ id: "other-done2", dedupeKey: "k-o2", status: "done" })) + "\n");
+
+    const deliver1 = vi.fn().mockResolvedValue({ ok: true });
+    const outbox1 = createOutbox({ dir, deliver: deliver1, retainDays: 7 });
+    await outbox1.start();
+    await sleep(120);
+    expect(deliver1).not.toHaveBeenCalled(); // 最终状态 done → 不投递（旧实现会先读到 pending 行而入队）
+    await outbox1.stop();
+
+    // 二次重建（模拟再次重启）：状态应来自快照段 = done，不回退、不重发
+    const deliver2 = vi.fn().mockResolvedValue({ ok: true });
+    const logger2 = { info: vi.fn(), warn: vi.fn() };
+    const outbox2 = createOutbox({ dir, deliver: deliver2, retainDays: 7, logger: logger2 });
+    await outbox2.start();
+    await sleep(120);
+    expect(deliver2).not.toHaveBeenCalled();
+    expect(logger2.info).toHaveBeenCalledWith(expect.stringContaining("队列 0 条"));
+    await outbox2.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("★ M47：pending 行在旧段、done 行在新段 → 队列 0 条（不再虚高）", async () => {
+    const dir = tmpDir();
+    const oldSec = Math.floor((Date.now() - DAY) / 1000);
+    const newSec = Math.floor(Date.now() / 1000);
+    const base = mkEnv({ id: "m47-1", dedupeKey: "k-m47" });
+    writeFileSync(join(dir, `seg-${oldSec}.jsonl`), JSON.stringify({ ...base, status: "pending" }) + "\n");
+    writeFileSync(join(dir, `seg-${newSec}.jsonl`), JSON.stringify({ ...base, status: "done" }) + "\n");
+    const deliver = vi.fn().mockResolvedValue({ ok: true });
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const outbox = createOutbox({ dir, deliver, retainDays: 7, logger });
+    await outbox.start();
+    await sleep(120);
+    // 旧实现：读到旧段的 pending 行就先入队 → 「队列 1 条」虚高（实测真机出现过「队列 6 条」而实际待发 0）
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("队列 0 条"));
+    expect(deliver).not.toHaveBeenCalled();
+    await outbox.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
