@@ -19,7 +19,8 @@ import { parseModelSig, formatModelSig, type ModelRegistry } from "../agent/mode
 export interface InteractiveRouterDeps {
   runtime: {
     getPermissionMode(): string;
-    setPermissionMode(mode: string): boolean;
+    /** ★ X5：设置改为 per-chat（chatId 必传）；返回 false=非法模式 */
+    setPermissionMode(mode: string, chatId: string): boolean;
     getAgentPreset(): string;
     setAgentPreset(id: string): void;
   };
@@ -31,19 +32,32 @@ export interface InteractiveRouterDeps {
   /** preset 中文名查询（preset 单选卡回执用；函数形式 → 跟随 listPresets 异步更新后的真实 roster） */
   presets?: () => readonly PresetOption[];
   logger?: { warn?: (m: string) => void; info?: (m: string) => void };
+  /** ★ X5（阶段5）：提权身份校验（共用判定，命令层同源）——返回 null=放行；string=拒绝提示 */
+  checkPermissionChange?: (target: string, operatorId?: string) => string | null;
+  /** ★ X5：卡片回调点击者 open_id（event-handler 传入；用于提权校验） */
+  operatorOf?: (chatId: string) => string | undefined;
 }
 
 export function createInteractiveRouter(deps: InteractiveRouterDeps) {
-  /** 权限切换（/mode /permission 单选卡共用） */
-  function switchPermission(chatId: string, arg: string): boolean {
-    const ok = deps.runtime.setPermissionMode(arg);
+  /** 权限切换（/mode /permission 单选卡共用）★ X5：per-chat 生效 + 提权需老板（fail-closed） */
+  function switchPermission(chatId: string, arg: string, operatorId?: string): boolean {
+    // ★ X5：提权校验在落盘之前（共用判定，与命令层同源）
+    if (deps.checkPermissionChange) {
+      const deny = deps.checkPermissionChange(arg, operatorId);
+      if (deny) {
+        deps.logger?.warn?.(`权限切换被拒 chat=${chatId} target=${arg} operator=${operatorId ?? "unknown"}（X5 fail-closed）`);
+        deps.reply(chatId, `🚫 ${deny}`);
+        return true;
+      }
+    }
+    const ok = deps.runtime.setPermissionMode(arg, chatId);
     if (!ok) {
       deps.reply(chatId, `⚠️ 未知权限模式「${arg}」`);
       return true;
     }
     deps.reply(
       chatId,
-      `🔐 权限模式已切换为「${permissionModeLabel(arg)}」\n📌 只对后续新消息生效，当前任务不受影响。`,
+      `🔐 **本会话**权限已切换为「${permissionModeLabel(arg)}」\n📌 只对**本会话**后续新消息生效，其他会话不受影响。`,
     );
     return true;
   }
@@ -76,12 +90,12 @@ export function createInteractiveRouter(deps: InteractiveRouterDeps) {
      * 单选卡回调分发。@returns true=已消费（event-handler 不再处理）
      * op 前缀不匹配 → false（保留未知前缀日志）
      */
-    async onCardAction(chatId: string, op: string): Promise<boolean> {
+    async onCardAction(chatId: string, op: string, operatorOpenId?: string): Promise<boolean> {
       const { cmd, arg } = parseOp(op);
       switch (cmd) {
         case "mode":
         case "permission":
-          return switchPermission(chatId, arg);
+          return switchPermission(chatId, arg, operatorOpenId);
         case "model":
           return switchModel(chatId, arg);
         case "preset":

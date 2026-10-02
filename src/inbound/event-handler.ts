@@ -99,8 +99,12 @@ export function createEventHandler(deps: EventHandlerDeps) {
                   const consumed = approvalBridge?.onCardAction(chatId, op, operatorOpenId) ?? false;
                   if (!consumed) logger?.warn?.(`card.action.trigger: 审批卡回调未消费 op=${op} chatId=${chatId}`);
                 } else {
-                  // P1-2 单选卡回调
-                  const consumed = (await interactiveRouter?.onCardAction(chatId, op)) ?? false;
+                  // P1-2 单选卡回调 ★ X5：传点击者 open_id（mode:/permission: 提权校验需要）
+                  const operatorOpenId =
+                    (d as any).operator?.operator_id?.open_id ??
+                    (d as any).operator?.open_id ??
+                    (d as any).operator?.operator_id;
+                  const consumed = (await interactiveRouter?.onCardAction(chatId, op, operatorOpenId)) ?? false;
                   if (!consumed) logger?.warn?.(`card.action.trigger: 单选卡 op 未消费 op=${op} chatId=${chatId}`);
                 }
               } catch (err) {

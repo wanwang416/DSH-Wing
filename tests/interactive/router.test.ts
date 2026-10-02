@@ -10,7 +10,8 @@ function mkDeps(over: Partial<Parameters<typeof createInteractiveRouter>[0]> = {
     permissionMode: "workspace-write",
     agentPreset: "standard",
   };
-  const setPermissionMode = vi.fn((mode: string) => {
+  const setPermissionMode = vi.fn((mode: string, _chatId: string) => {
+    // ★ X5（阶段5）：签名改为 (mode, chatId)——per-chat 落盘
     if (mode === "read-only" || mode === "workspace-write" || mode === "danger-full-access") {
       state.permissionMode = mode;
       return true;
@@ -46,20 +47,20 @@ function mkDeps(over: Partial<Parameters<typeof createInteractiveRouter>[0]> = {
 }
 
 describe("interactive router onCardAction", () => {
-  it("mode:read-only → setPermissionMode + 中文回执（含只对新消息生效）", async () => {
+  it("mode:read-only → setPermissionMode(chatId, mode) + 中文回执（★X5 本会话语义）", async () => {
     const { router, setPermissionMode, reply } = mkDeps();
-    const consumed = await router.onCardAction("oc_1", "mode:read-only");
+    const consumed = await router.onCardAction("oc_1", "mode:read-only", "ou_boss");
     expect(consumed).toBe(true);
-    expect(setPermissionMode).toHaveBeenCalledWith("read-only");
+    expect(setPermissionMode).toHaveBeenCalledWith("read-only", "oc_1"); // ★X5：per-chat
     expect(reply).toHaveBeenCalledWith("oc_1", expect.stringContaining("只读"));
-    expect(reply).toHaveBeenCalledWith("oc_1", expect.stringContaining("只对后续新消息生效"));
+    expect(reply).toHaveBeenCalledWith("oc_1", expect.stringContaining("本会话"));
   });
 
   it("permission:read-only → 同 mode（/permission 单选卡共用）", async () => {
     const { router, setPermissionMode, reply } = mkDeps();
     const consumed = await router.onCardAction("oc_1", "permission:read-only");
     expect(consumed).toBe(true);
-    expect(setPermissionMode).toHaveBeenCalledWith("read-only");
+    expect(setPermissionMode).toHaveBeenCalledWith("read-only", "oc_1");
     expect(reply).toHaveBeenCalled();
   });
 
@@ -67,7 +68,7 @@ describe("interactive router onCardAction", () => {
     const { router, setPermissionMode, reply } = mkDeps();
     const consumed = await router.onCardAction("oc_1", "mode:super-admin");
     expect(consumed).toBe(true);
-    expect(setPermissionMode).toHaveBeenCalledWith("super-admin"); // 校验在 set 里拒绝
+    expect(setPermissionMode).toHaveBeenCalledWith("super-admin", "oc_1"); // 校验在 set 里拒绝
     expect(reply).toHaveBeenCalledWith("oc_1", expect.stringContaining("未知权限模式"));
   });
 

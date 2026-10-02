@@ -69,6 +69,8 @@ export interface WingConfig {
    * 未配置 → 审批卡不拦截任何人（单用户宽松 + 日志 warn 提示风险）。
    */
   bossOpenId?: string;
+  /** ★ X5（阶段5）：企微老板 userid（企微身份与飞书 open_id 不同源；提权校验用） */
+  wecomBossUserId?: string;
   /** 企微智能机器人线路（长连接；enabled=false 默认不启用） */
   wecom: WecomConfig;
 }

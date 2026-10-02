@@ -186,7 +186,7 @@ describe("createEventHandler（M4 提取重构）", () => {
         context: { open_chat_id: "oc_1" },
         action: { value: { op: "mode:read-only" } },
       });
-      await vi.waitFor(() => expect(onCardAction).toHaveBeenCalledWith("oc_1", "mode:read-only"));
+      await vi.waitFor(() => expect(onCardAction).toHaveBeenCalledWith("oc_1", "mode:read-only", undefined) /* ★X5 无 operator 事件透传 undefined */);
       expect(deps.mapper.getOrCreateAgent).not.toHaveBeenCalled();
       expect(deps.logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("不匹配 answer:/free_text: 前缀"));
     });
@@ -199,7 +199,7 @@ describe("createEventHandler（M4 提取重构）", () => {
         context: { open_chat_id: "oc_1" },
         action: { value: "model:deepseek/deepseek-chat" },
       });
-      await vi.waitFor(() => expect(onCardAction).toHaveBeenCalledWith("oc_1", "model:deepseek/deepseek-chat"));
+      await vi.waitFor(() => expect(onCardAction).toHaveBeenCalledWith("oc_1", "model:deepseek/deepseek-chat", undefined) /* ★X5 无 operator 事件透传 undefined */);
     });
 
     it("op 未被消费（返回 false）→ warn「op 未消费」", async () => {

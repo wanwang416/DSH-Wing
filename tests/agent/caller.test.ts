@@ -44,7 +44,8 @@ function makeDeps(ctx: any, overrides: Record<string, unknown> = {}) {
   return {
     ctx,
     agentPreset: "default",
-    permissionMode: "workspace-write" as const,
+    // ★ X5（阶段5）：permissionMode 全局单例改为按会话解析（override ?? 默认）
+    resolvePermission: (_chatId: string) => "workspace-write" as const,
     onSessionEvent: vi.fn(),
     logger: { warn: vi.fn(), info: vi.fn() },
     ...overrides,

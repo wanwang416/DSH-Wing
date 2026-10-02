@@ -24,8 +24,8 @@ export interface CreateAgentDeps {
    *   （路由键与会话 id 分裂，双平台隔离只做了一半）。缺省保持 `feishu` 兼容旧行为。
    */
   sessionPrefix?: string;
-  /** ★ 权限模式（默认保守 workspace-write） */
-  permissionMode: PermissionMode;
+  /** ★ X5（阶段5）：按会话解析权限模式（per-chat override ?? 配置默认值） */
+  resolvePermission(chatId: string): PermissionMode;
   /** 事件回调：chatId + 归一化 session 事件 */
   onSessionEvent(chatId: string, event: SessionEventOut): void;
   /** P1-2：该 chat 的 live 模型对象（override 优先；installModelSelection 传引用 → mutate 即生效） */
@@ -158,8 +158,8 @@ export async function createAgent(deps: CreateAgentDeps, chatId: string): Promis
   // ★ workspace attach（session 归属工作区，DSH 才能正确管理/恢复——ALAN 反馈 1/2）
   await attachWorkspace(ctx, cwd, sessionId, deps.logger);
 
-  // ★ 权限应用（默认保守 workspace-write，M1 就做）
-  applyPermission(ctx, agent, deps.permissionMode, deps.logger);
+  // ★ 权限应用（默认保守 workspace-write，M1 就做）★ X5：按会话解析（per-chat override）
+  applyPermission(ctx, agent, deps.resolvePermission(chatId), deps.logger);
 
   // 事件订阅：session/event → 归一化 → 回调
   const disp = agent.ctx.on("session/event", (_session: unknown, ev: unknown) => {
@@ -242,8 +242,8 @@ export async function resumeAgent(deps: CreateAgentDeps, sessionId: string): Pro
   // workspace attach（resume 的 session 同样归属工作区）
   await attachWorkspace(ctx, deps.workspaceRoot ?? process.cwd(), sessionId, deps.logger);
 
-  // 权限应用（resume 的 agent 同样设置）
-  applyPermission(ctx, agent, deps.permissionMode, deps.logger);
+  // 权限应用（resume 的 agent 同样设置）★ X5：chatId 从 sessionId 反推，按会话解析
+  applyPermission(ctx, agent, deps.resolvePermission(chatIdOf), deps.logger);
 
   const disp = agent.ctx.on("session/event", (_session: unknown, ev: unknown) => {
     const out = toSessionEventOut(ev);

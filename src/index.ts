@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
-import { getConfig, type WingConfig } from "./config/defaults.js";
+import { getConfig, type WingConfig, type PermissionMode } from "./config/defaults.js";
 import { createCredentialStore } from "./host/credentials.js";
 import { buildLarkClient, type WingLarkClient } from "./host/client.js";
 import { createTransport } from "./host/websocket.js";
@@ -52,6 +52,7 @@ import { modelCommand } from "./commands/model.js";
 import { presetCommand } from "./commands/preset.js";
 import { helpCommand } from "./commands/help.js";
 import { createModelOverrideStore } from "./session/model-overrides.js";
+import { createPermissionOverrideStore, checkPermissionChange } from "./session/permission-overrides.js";
 import { createModelRegistry, createModelSync } from "./agent/model.js";
 import { listPresets, SHIPPED_PRESETS, type PresetOption } from "./agent/preset.js";
 import { createInteractiveRouter } from "./interactive/router.js";
@@ -299,18 +300,29 @@ export function apply(ctx: any, rawConfig: unknown): void {
     },
   });
 
+  // ★ X5（阶段5）：per-chat 权限覆盖存储（照抄 model-overrides 模式；原子写 + 解析失败 .bak）
+  const permissionOverrides = createPermissionOverrideStore(join(dir, "permission-overrides.json"));
+
   // ---------- P0-3 runtime 可变状态（/mode 只对新消息生效：新建 agent 读 runtime） ----------
   // 拍板：当前运行 agent 权限不变更，避免中途改权限安全漏洞
   const runtime = {
-    permissionMode: cfg.permissionMode,
     agentPreset: cfg.agentPreset,
+    // ★ X5：全局权限模式降级为"默认值"——各会话可 override（permission-overrides.json 落盘）；
+    //   未设置过 override 的会话用此值。这也是 getPermissionMode() 的回退语义。
+    defaultPermissionMode: cfg.permissionMode as PermissionMode,
   };
-  /** 校验 + 设置权限模式（非法返回 false）；runtime/commandServices/interactiveRouter 共用 */
-  const setPermissionMode = (mode: string): boolean => {
+  /** 校验 + 设置权限模式（非法返回 false）；★ X5 起改为 per-chat override（+chatId 参数） */
+  const setPermissionMode = (mode: string, chatId?: string): boolean => {
     if (mode !== "read-only" && mode !== "workspace-write" && mode !== "danger-full-access") return false;
-    runtime.permissionMode = mode;
+    if (chatId) {
+      permissionOverrides.set(chatId, mode);
+    } else {
+      // 无 chatId（不应发生：命令层/卡片回调都带会话）——保守落默认值
+      runtime.defaultPermissionMode = mode;
+    }
     return true;
   };
+  // ★ X5：defaultPermissionMode 已在 runtime 初始化时赋值（见上），此处不再重复赋值
 
   // ---------- P1-2 模型 registry + preset 缓存 + 单选卡回调路由 ----------
   // 模型：per-chat live 对象（override 优先）；GUI 默认经 10s 轮询刷新
@@ -341,11 +353,19 @@ export function apply(ctx: any, rawConfig: unknown): void {
   // ★ 回执 dedupeKey 带 Date.now() 唯一 token——同一张卡点两次不被 durableReply 去重吞（成熟桥接踩坑）
   const interactiveRouter = createInteractiveRouter({
     runtime: {
-      getPermissionMode: () => runtime.permissionMode,
+      getPermissionMode: () => runtime.defaultPermissionMode,
       setPermissionMode,
       getAgentPreset: () => runtime.agentPreset,
       setAgentPreset: (id: string) => { runtime.agentPreset = id; },
     },
+    // ★ X5：提权身份校验（命令层与卡片回调共用同一判定，fail-closed）
+    checkPermissionChange: (target, operatorId) =>
+      checkPermissionChange({
+        target: target as PermissionMode,
+        operatorId,
+        bossOpenId: cfg.bossOpenId,
+        wecomBossUserId: cfg.wecomBossUserId,
+      }),
     modelRegistry,
     rotateSession,
     reply: (chatId, text) =>
@@ -516,7 +536,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
     sessionPrefix, // ★ 会话 id 平台前缀（企微必须 wecom:，否则 sessionId 落回 feishu:）
     workspaceRoot: cfg.workspaceRoot,
     agentPreset: runtime.agentPreset,
-    permissionMode: runtime.permissionMode,
+    // ★ X5：按会话解析权限（override 优先，未设置 → 配置默认值）
+    resolvePermission: (chatId: string) => permissionOverrides.resolveFor(chatId, runtime.defaultPermissionMode),
     onSessionEvent: (chatId: string, event: Parameters<typeof forwarder.onSessionEvent>[1]) =>
       forwarder.onSessionEvent(chatId, event),
     // P1-2 live 模型对象（/model 手动 override 优先；mutate 即对已存在 agent 生效）
@@ -907,8 +928,20 @@ export function apply(ctx: any, rawConfig: unknown): void {
     inboundWal: { pendingCount: () => inboundWal.pendingCount() },
     connection: { state: () => supervisor.state() },
     runtime: {
-      getPermissionMode: () => runtime.permissionMode,
+      // ★ X5（阿深收口）：原先此处漏改（仍引用已删除的 runtime.permissionMode → typecheck 红）。
+      //   getPermissionMode 保留为"配置默认值"（未指定会话时的回退）；
+      //   getPermissionModeFor 才是各会话的真实取值（override ?? 默认值）。
+      getPermissionMode: () => runtime.defaultPermissionMode,
+      getPermissionModeFor: (chatId: string) =>
+        permissionOverrides.resolveFor(chatId, runtime.defaultPermissionMode),
       setPermissionMode, // 提取共用：runtime/interactiveRouter/命令层同一校验
+      checkPermissionChange: (target: string, operatorId?: string) =>
+        checkPermissionChange({
+          target: target as PermissionMode,
+          operatorId,
+          bossOpenId: cfg.bossOpenId,
+          wecomBossUserId: cfg.wecomBossUserId,
+        }),
       getAgentPreset: () => runtime.agentPreset,
       setAgentPreset: (id: string) => { runtime.agentPreset = id; },
     },

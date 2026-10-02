@@ -33,7 +33,11 @@ export function applyPermission(
     logger?.warn?.("permissionPresets 服务不可用，跳过权限设置（M1 默认保守由配置保证）");
     return false;
   } catch (err) {
-    logger?.warn?.(`权限设置失败: ${err instanceof Error ? err.message : String(err)}`);
+    // ★ M40（阶段5）：宿主 resolve 对未知名抛错会被这里接住——warn 必须写明「未生效」+ preset 名，
+    //   让链路可核对（caller 层 /mode 回执不得谎报「已切换」）。read-only 等三档在 dsh-base
+    //   patch（@deepseek-ai/dsh-permission-presets 默认表）已内置，正常部署不会走到本分支。
+    const detail = err instanceof Error ? err.message : String(err);
+    logger?.warn?.(`权限设置失败（未生效，维持默认权限）：请求 preset=${mode}，宿主返回：${detail}`);
     return false;
   }
 }

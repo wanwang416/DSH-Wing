@@ -42,11 +42,15 @@ export interface BridgeCommandServices {
   inboundWal?: { pendingCount(): number };
   /** 连接状态（/status 用，supervisor.state()） */
   connection?: { state(): string };
-  /** 可变 runtime（/mode /permission /status /preset 用） */
+  /** 可变 runtime（/mode /permission /status /preset 用）★ X5：权限 per-chat 化 */
   runtime?: {
     getPermissionMode(): string;
-    /** 校验 + 设置；非法模式返回 false */
-    setPermissionMode(mode: string): boolean;
+    /** ★ X5：读本会话解析值（override ?? 默认）；未提供时调用方回退 getPermissionMode */
+    getPermissionModeFor?(chatId: string): string;
+    /** ★ X5：校验 + 设置**本会话**权限；非法模式返回 false */
+    setPermissionMode(mode: string, chatId: string): boolean;
+    /** ★ X5：提权身份校验（共用判定）——null=放行；string=拒绝的人话提示 */
+    checkPermissionChange?(target: string, operatorId?: string): string | null;
     getAgentPreset(): string;
     /** 设置 agent 预设（P1-2 /preset 单选卡；切换后由命令层触发 rotateSession） */
     setAgentPreset(id: string): void;

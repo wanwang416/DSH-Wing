@@ -104,7 +104,7 @@ describe("/mode", () => {
     const res = await modeCommand.run(ctx, "", msg("/mode"));
     expect(res?.card).toBeDefined();
     const card = res!.card!;
-    expect((card.header as any).title.content).toBe("🔐 切换权限模式");
+    expect((card.header as any).title.content).toBe("🔐 切换本会话权限模式"); // ★X5：本会话语义
     const els = (card.body as any).elements as any[];
     const buttons = els.slice(2) as any[];
     expect(buttons).toHaveLength(3);
@@ -123,14 +123,14 @@ describe("/mode", () => {
     expect(setPermissionMode).not.toHaveBeenCalled();
   });
 
-  it("合法参数 → setPermissionMode + 注明只对新消息生效", async () => {
-    const setPermissionMode = vi.fn(() => true);
-    const ctx = mkCtx({ services: { runtime: { getPermissionMode: () => "workspace-write", setPermissionMode, getAgentPreset: () => "code" } } });
-    const res = await modeCommand.run(ctx, "read-only", msg("/mode read-only"));
-    expect(setPermissionMode).toHaveBeenCalledWith("read-only");
-    expect(res?.text).toContain("已切换为");
-    expect(res?.text).toContain("只对后续新消息生效");
-  });
+  it("合法参数 → setPermissionMode(chatId, mode) + 本会话回执（★X5）", async () => {
+      const setPermissionMode = vi.fn(() => true);
+      const ctx = mkCtx({ services: { runtime: { getPermissionMode: () => "workspace-write", setPermissionMode, getAgentPreset: () => "code" } } });
+      const res = await modeCommand.run(ctx, "read-only", msg("/mode read-only"));
+      expect(setPermissionMode).toHaveBeenCalledWith("read-only", "oc_1"); // ★X5：per-chat
+      expect(res?.text).toContain("已记录为"); // ★M40：不谎报已切换
+      expect(res?.text).toContain("本会话");
+    });
 
   it("setPermissionMode 返回 false → 提示更新失败", async () => {
     const ctx = mkCtx({ services: { runtime: { getPermissionMode: () => "workspace-write", setPermissionMode: () => false, getAgentPreset: () => "code" } } });
