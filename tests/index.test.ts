@@ -239,6 +239,9 @@ vi.mock("../src/outbound/sender.js", () => ({
 }));
 
 vi.mock("../src/outbound/outbox.js", () => ({
+  // ★ M11（2026-10-02）：experience/index 改用 describeError 串行化错误对象，mock 需透出真实实现
+  describeError: (err: unknown) =>
+    err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err),
   createOutbox: vi.fn(() => ({
     enqueue: vi.fn((env: any) => { h.enqueued.push(env); return Promise.resolve(); }),
     rebuildFromDisk: vi.fn(),

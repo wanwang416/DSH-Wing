@@ -50,7 +50,7 @@ describe("WecomStreamCard：N1(a)/M3 无帧降级", () => {
     await card.addText("你好");
     await card.addText("，这是中间内容");
     await card.addText("，收尾完整终稿");
-    await card.finalize("你好，这是中间内容，收尾完整终稿");
+    await card.finalizeToNewCard("你好，这是中间内容，收尾完整终稿");
     expect(beginStream).not.toHaveBeenCalled();
     expect(onFallback).toHaveBeenCalledTimes(1);
     expect(onFallback).toHaveBeenCalledWith("u1", "你好，这是中间内容，收尾完整终稿");
@@ -63,7 +63,7 @@ describe("WecomStreamCard：N1(a)/M3 无帧降级", () => {
     expect(beginStream).toHaveBeenCalledTimes(1);
     await card.addText("中".repeat(40)); // 40 字符 ≥ WECOM_STREAM_MIN_DELTA，跳过节流直接推帧
     expect(stream).toHaveBeenCalled();
-    await card.finalize("完整回答");
+    await card.finalizeToNewCard("完整回答");
     expect(onFallback).not.toHaveBeenCalled();
   });
 
@@ -72,7 +72,7 @@ describe("WecomStreamCard：N1(a)/M3 无帧降级", () => {
     stream.mockRejectedValueOnce(new Error("网络中断"));
     const { card, onFallback } = makeCard(sender);
     await card.addText("开头");
-    await card.finalize("完整回答");
+    await card.finalizeToNewCard("完整回答");
     expect(onFallback).toHaveBeenCalledTimes(1);
     expect(onFallback).toHaveBeenCalledWith("u1", "完整回答");
   });

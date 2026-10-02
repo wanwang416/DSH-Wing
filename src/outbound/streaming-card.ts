@@ -16,6 +16,7 @@
  */
 
 import type { Sender } from "./sender.js";
+import { describeError } from "./outbox.js";
 import { ToolStep, truncateText, compactSteps, stepsFallbackMarkdown } from "./tool-step.js";
 
 export type { ToolStep } from "./tool-step.js";
@@ -178,7 +179,8 @@ export interface StreamCardHandle {
   addTool(name: string, input?: string): Promise<void>;
   setToolResult(name: string, error?: unknown): Promise<void>;
   addContext(text?: string): Promise<void>;
-  finalize(answer: string): Promise<void>;
+  // ★ G2（2026-10-02）：死方法 finalize() 已删除（原全仓 0 调用点）。
+  //   收尾统一走 finalizeToNewCard（completed 发结果卡；其余 reason 发收尾说明卡）。
   finalizeToNewCard(answer: string): Promise<boolean>;
   readonly cardId: string;
 }
@@ -288,7 +290,7 @@ export class StreamingCard implements StreamCardHandle {
         // 不设 lastPatch*：创建后首次 patch 强制发送，保证步骤/回答可见
         return true;
       } catch (err) {
-        this.deps.logger?.warn?.(`CardKit 创建失败，降级 inline 卡片: ${err instanceof Error ? err.message : String(err)}`);
+        this.deps.logger?.warn?.(`CardKit 创建失败，降级 inline 卡片: ${describeError(err)}`);
         // fall through 到 inline 路径
       }
     }
@@ -309,7 +311,7 @@ export class StreamingCard implements StreamCardHandle {
       return true;
     } catch (err) {
       this.failed = true;
-      this.deps.logger?.warn?.(`StreamingCard 创建失败，降级普通消息: ${err instanceof Error ? err.message : String(err)}`);
+      this.deps.logger?.warn?.(`StreamingCard 创建失败，降级普通消息: ${describeError(err)}`);
       return false;
     }
   }
@@ -350,7 +352,7 @@ export class StreamingCard implements StreamCardHandle {
       await this.deps.sender.updateCard(this.messageId!, this.fullCardJson(false).json);
     } catch (err) {
       this.failed = true;
-      this.deps.logger?.warn?.(`StreamingCard 全量更新失败，降级普通消息: ${err instanceof Error ? err.message : String(err)}`);
+      this.deps.logger?.warn?.(`StreamingCard 全量更新失败，降级普通消息: ${describeError(err)}`);
       const answer = this.answer.trim();
       if (answer && answer !== "No response.") {
         await this.deps.onFallback?.(this.chatId, answer);
@@ -372,7 +374,7 @@ export class StreamingCard implements StreamCardHandle {
       await this.deps.sender.updateCard(this.messageId!, this.fullCardJson(false).json);
     } catch (err) {
       this.failed = true;
-      this.deps.logger?.warn?.(`StreamingCard 全量更新失败，降级普通消息: ${err instanceof Error ? err.message : String(err)}`);
+      this.deps.logger?.warn?.(`StreamingCard 全量更新失败，降级普通消息: ${describeError(err)}`);
       const answer = this.answer.trim();
       if (answer && answer !== "No response.") {
         await this.deps.onFallback?.(this.chatId, answer);
@@ -399,7 +401,7 @@ export class StreamingCard implements StreamCardHandle {
     } catch (err) {
       // 一级降级：CardKit → inline updateMessage
       if (this.streamMode === "cardkit") {
-        this.deps.logger?.warn?.(`CardKit 流式失败，降级 updateMessage: ${err instanceof Error ? err.message : String(err)}`);
+        this.deps.logger?.warn?.(`CardKit 流式失败，降级 updateMessage: ${describeError(err)}`);
         this.streamMode = "inline";
         try {
           await this.deps.sender.updateCard(this.messageId!, this.fullCardJson(false).json);
@@ -410,7 +412,7 @@ export class StreamingCard implements StreamCardHandle {
       }
       // 二级降级：inline → text
       this.failed = true;
-      this.deps.logger?.warn?.(`StreamingCard 回答更新失败，降级普通消息: ${err instanceof Error ? err.message : String(err)}`);
+      this.deps.logger?.warn?.(`StreamingCard 回答更新失败，降级普通消息: ${describeError(err)}`);
     }
   }
 
@@ -496,28 +498,8 @@ export class StreamingCard implements StreamCardHandle {
     }
   }
 
-  /** 最终回答（assistant/message）：完整卡片落地 */
-  async finalize(answer: string): Promise<void> {
-    this.closeForFinalize(); // ★ M10：无论走哪条分支，先停掉在途防抖
-    if (this.failed) {
-      if (answer && answer.trim() !== "" && answer.trim() !== "No response.") {
-        await this.deps.onFallback?.(this.chatId, answer);
-      }
-      return;
-    }
-    this.answer = answer;
-    this.status = answer.trim() ? "done" : this.status;
-    if (!(await this.ensureCreated())) return;
-    try {
-      await this.deps.sender.updateCard(this.messageId!, this.fullCardJson(false).json);
-    } catch (err) {
-      this.failed = true;
-      this.deps.logger?.warn?.(`StreamingCard finalize 失败，降级普通消息: ${err instanceof Error ? err.message : String(err)}`);
-      if (answer && answer.trim() !== "" && answer.trim() !== "No response.") {
-        await this.deps.onFallback?.(this.chatId, answer);
-      }
-    }
-  }
+  // ★ G2（2026-10-02）：finalize() 已从 StreamCardHandle 删除（死代码，0 调用点）。
+  //   收尾统一走 finalizeToNewCard（completed 发结果卡；其余 reason 发收尾说明卡）。
 
   /**
    * ★ 卡片改造：本轮真正收尾时**另起一张干净「结果卡」**（与过程卡解耦）。
@@ -560,7 +542,7 @@ export class StreamingCard implements StreamCardHandle {
           }
         }
       } catch (err) {
-        this.deps.logger?.warn?.(`结果卡 CardKit 失败，降级 inline: ${err instanceof Error ? err.message : String(err)}`);
+        this.deps.logger?.warn?.(`结果卡 CardKit 失败，降级 inline: ${describeError(err)}`);
         // fall through → inline（create 失败 = 卡片未发出，此处降级是正确的）
       }
     }
@@ -571,7 +553,7 @@ export class StreamingCard implements StreamCardHandle {
       if (!mid) throw new Error("sendCard 未返回 message_id");
       return true;
     } catch (err) {
-      this.deps.logger?.warn?.(`结果卡 inline 失败，降级普通文本: ${err instanceof Error ? err.message : String(err)}`);
+      this.deps.logger?.warn?.(`结果卡 inline 失败，降级普通文本: ${describeError(err)}`);
       this.failed = true;
       await this.deps.onFallback?.(this.chatId, text);
       return false;

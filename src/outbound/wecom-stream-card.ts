@@ -87,11 +87,6 @@ export class WecomStreamCard implements StreamCardHandle {
     return "";
   }
 
-  /** 真正落地：finish=true 结束流；无流式 handle → 降级普通文本 */
-  async finalize(answer: string): Promise<void> {
-    await this.finish(answer);
-  }
-
   /** ★ 对齐 StreamingCard.finalizeToNewCard：企微无「独立结果卡」概念，语义同 finalize（结束流式） */
   async finalizeToNewCard(answer: string): Promise<boolean> {
     const text = (answer ?? "").trim();

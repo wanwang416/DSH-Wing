@@ -148,14 +148,17 @@ describe("experience.onAssistantMessage", () => {
     expect(deps.sendText).toHaveBeenCalledWith("oc_1", "兜底完整回答");
     expect(deps.turnSupervisor.disarm).toHaveBeenCalledWith("oc_1");
   });
-  it("空/空白/No response → onTurnEnd 不发结果卡、不 sendText", async () => {
+  it("空/空白/No response → 不发结果卡正文，但 G2 要求发收尾说明卡（不再静默不动作）", async () => {
     const { deps, ex, card } = setup();
     ex.onTurnStart("oc_1");
     await ex.onAssistantMessage("oc_1", "");
     await ex.onAssistantMessage("oc_1", "   ");
     await ex.onAssistantMessage("oc_1", "No response.");
     await ex.onTurnEnd("oc_1", "completed");
-    expect(card.finalizeToNewCard).not.toHaveBeenCalled();
+    // ★ G2（2026-10-02）：旧行为"无正文时对卡片不做任何动作"已被有意废弃（卡片会永远停在 Working…）；
+    //   新行为：不发结果卡正文（finalizeToNewCard 不收 "最终答案"），但发收尾说明关掉流式态
+    expect(card.finalizeToNewCard).not.toHaveBeenCalledWith("No response.");
+    expect(card.finalizeToNewCard).toHaveBeenCalledWith(expect.stringContaining("已结束"));
     expect(deps.sendText).not.toHaveBeenCalled();
   });
   it("reactions 关闭 → 不发 done 表情（done 移到 turn/end）", async () => {

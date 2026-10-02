@@ -12,6 +12,7 @@
 
 import type { WingConfig } from "../config/defaults.js";
 import { StreamingCard, type StreamCardHandle } from "../outbound/streaming-card.js";
+import { describeError } from "../outbound/outbox.js";
 import { classifyInterrupt, InterruptType, isForwardWord, isRedirectWord } from "../inbound/interrupt-classify.js";
 import { appendFileSync } from "node:fs";
 
@@ -179,6 +180,7 @@ export function createExperience(deps: ExperienceDeps) {
     /** turn/end：判定真正结束 → 发独立「结果卡」；失败/无产出 → 警告+表情 */
     async onTurnEnd(chatId: string, reason: string): Promise<void> {
       const s = st(chatId);
+      const cardAtEnd = s.card; // ★ M7：本轮卡引用快照（state 对象会被新轮次复用，不可作身份）
       const finalAnswer = s.latestAnswer?.trim();
       if (reason === "completed" && finalAnswer && finalAnswer !== "No response.") {
         // ★ 正常完成 → 发独立结果卡（干净、在最新处、不用上翻——治 Bug1）；过程卡保持可展开回看
@@ -194,13 +196,34 @@ export function createExperience(deps: ExperienceDeps) {
             deps.addReaction(mid, deps.cfg().reactions.done).catch(() => void 0);
           }
         } catch (err) {
-          deps.logger?.warn?.(`结果卡发送异常: ${err instanceof Error ? err.message : String(err)}`);
+          deps.logger?.warn?.(`结果卡发送异常: ${describeError(err)}`);
         }
-      } else if (!s.hasOutput && reason !== "completed") {
+      } else {
+        // ★ G2（2026-10-02）：所有非「completed+有正文」的结束路径都必须收尾过程卡——
+        //   旧实现 aborted/error/max-tokens/无正文/超时 dispose 分支不做任何动作，
+        //   卡片 header 永远停在 "Working…"、CardKit 流式态永不关闭，用户无法区分卡死与在跑。
+        //   收尾说明按 reason 区分（aborted → 已停止；error/max-tokens → 出错说明；其余 → 已结束）。
+        const note =
+          reason === "aborted"
+            ? "⚠️ 已停止（用户中断），本轮到此为止"
+            : reason === "max-tokens"
+              ? "⚠️ 已结束（达到输出上限），本轮到此为止"
+              : reason === "error"
+                ? "⚠️ 已结束（本轮出错），过程如下"
+                : "⚠️ 本轮已结束";
         try {
-          await deps.sendText(chatId, "⚠️ 本轮没有产出回复");
-        } catch {
-          // 忽略
+          if (s.card) {
+            await s.card.finalizeToNewCard(note);
+          }
+        } catch (err) {
+          deps.logger?.warn?.(`过程卡收尾异常（reason=${reason}）: ${describeError(err)}`);
+        }
+        if (!s.hasOutput && reason !== "completed") {
+          try {
+            await deps.sendText(chatId, "⚠️ 本轮没有产出回复");
+          } catch {
+            // 忽略
+          }
         }
       }
       if (reason === "error" || reason === "aborted" || reason === "max-tokens") {
@@ -209,7 +232,13 @@ export function createExperience(deps: ExperienceDeps) {
           deps.addReaction(mid, deps.cfg().reactions.failed).catch(() => void 0);
         }
       }
-      streams.delete(chatId);
+      // ★ M7（2026-10-02）：收尾经多次网络往返（数百 ms~数秒），期间新一轮 onTurnStart 可能已换 card。
+      //   身份校验以 card 引用为准（onTurnStart 复用同一 state 对象、只换 card 字段，state 引用恒等）：
+      //   仅当 map 里仍是本轮这张卡（未被新轮次替换）才整条删除；已换新 → 保留新轮次 state。
+      const cur = streams.get(chatId);
+      if (!cur || cur.card === cardAtEnd) {
+        streams.delete(chatId);
+      }
     },
 
     /**
@@ -255,7 +284,7 @@ export function createExperience(deps: ExperienceDeps) {
             agent.steer(message);
             diagLog(`[steer-diag] STEER 分支: text="${text.slice(0, 30)}" status=${agent.status} steer() 调用成功`);
           } catch (err) {
-            diagLog(`[steer-diag] STEER 分支但 steer() 抛异常: ${err instanceof Error ? err.message : String(err)}`);
+            diagLog(`[steer-diag] STEER 分支但 steer() 抛异常: ${describeError(err)}`);
           }
           return "steered";
         }
@@ -305,7 +334,7 @@ export function createExperience(deps: ExperienceDeps) {
               agent.steer(message);
               diagLog(`[steer-diag] V4 null STEER 分支: text="${text.slice(0, 30)}" status=${agent.status} steer() 调用成功`);
             } catch (err) {
-              diagLog(`[steer-diag] V4 null STEER 分支但 steer() 抛异常: ${err instanceof Error ? err.message : String(err)}`);
+              diagLog(`[steer-diag] V4 null STEER 分支但 steer() 抛异常: ${describeError(err)}`);
             }
             return "steered";
           }

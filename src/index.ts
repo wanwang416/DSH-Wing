@@ -407,7 +407,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
         const out = await ctx.commands?.execute?.(agent, line, [], new AbortController().signal);
         return out?.result as DshCommandResult | undefined;
       } catch (err) {
-        return { kind: "error", text: err instanceof Error ? err.message : String(err) };
+        return { kind: "error", text: describeError(err) };
       }
     },
   };
@@ -436,7 +436,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
       const res = await routed.command
         .run({ logger, services: commandServices }, routed.rawInput, msg)
         .catch((err: unknown): { text?: string; card?: Record<string, unknown> } => ({
-          text: `⚠️ 命令执行失败: ${err instanceof Error ? err.message : String(err)}`,
+          text: `⚠️ 命令执行失败: ${describeError(err)}`,
         }));
       reply = res?.text;
       replyCard = res?.card;
@@ -536,7 +536,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
           routeStore.upsert({ ...existing, sessionId: handle.sessionId, updatedAt: Date.now() });
           return handle;
         } catch (err) {
-          logger.warn?.(`resume 失败（${existing.sessionId}），创建新 session: ${err instanceof Error ? err.message : String(err)}`);
+          logger.warn?.(`resume 失败（${existing.sessionId}），创建新 session: ${describeError(err)}`);
         }
       }
       const handle = await createAgent(makeAgentDeps(prefix), chatId);
@@ -1057,7 +1057,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
         logger.info?.(`企微首条群聊 diag: chat=${msg.chatId} mentions=${JSON.stringify(msg.mentions)} raw="${msg.rawText.slice(0, 80)}"`);
       }
       void dispatcher.handleParsed(msg).catch((err) =>
-        logger.error?.(`企微消息处理失败: ${err instanceof Error ? err.message : String(err)}`),
+        logger.error?.(`企微消息处理失败: ${describeError(err)}`),
       );
     });
     client.onEvent((frame) => {
@@ -1152,7 +1152,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
       startBlocker = undefined;
       logger.info?.("bridge started (M2 + P1-2 model sync)");
     } catch (err) {
-      startBlocker = err instanceof Error ? err.message : String(err);
+      startBlocker = describeError(err);
       logger.error?.(`bridge 启动失败: ${startBlocker}`);
     }
   };

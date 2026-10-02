@@ -184,14 +184,14 @@ describe("StreamingCard（inline 模式）", () => {
     expect(sender.updateCard).not.toHaveBeenCalled();
   });
 
-  it("finalize → status done + updateCard（header green）", async () => {
+  // ★ G2（2026-10-02）：死方法 finalize() 已删除；下列用例迁移到 finalizeToNewCard 语义。
+  //   （旧"原地更新过程卡为终稿"路径不再存在——收尾统一走独立结果卡，与 completed 分支一致。）
+  it("finalizeToNewCard → 发独立结果卡（sendCard 新建，非 updateCard 改写过程卡）", async () => {
     const { sender, card } = setup();
     sender.sendCard.mockResolvedValue({ data: { message_id: "m_1" } });
-    await card.finalize("完整答案");
-    const j = JSON.parse(sender.updateCard.mock.calls.at(-1)[1]);
-    expect(j.header.template).toBe("green");
-    expect(j.header.title.content).toBe("Done");
-    expect(j.body.elements.at(-1).content).toBe("完整答案");
+    expect(await card.finalizeToNewCard("完整答案")).toBe(true);
+    expect(sender.sendCard).toHaveBeenCalled();
+    expect(sender.updateCard).not.toHaveBeenCalled();
   });
 
   it("sendCard 未返回 message_id → throw → failed，后续 addText 短路", async () => {
@@ -217,33 +217,32 @@ describe("StreamingCard（inline 模式）", () => {
     expect(onFallback).toHaveBeenCalledWith("oc_1", "有答案");
   });
 
-  it("finalize updateCard 抛错 → failed + onFallback", async () => {
+  it("finalizeToNewCard → updateCard 不参与（结果卡走 sendCard；失败降 onFallback）", async () => {
     const { sender, onFallback, card } = setup();
-    sender.sendCard.mockResolvedValue({ data: { message_id: "m_1" } });
-    sender.updateCard.mockRejectedValueOnce(new Error("finalize fail"));
-    await card.finalize("有答案");
+    sender.sendCard.mockResolvedValue({}); // sendCard 拿不到 message_id → failed
+    await card.finalizeToNewCard("有答案");
     expect(onFallback).toHaveBeenCalledWith("oc_1", "有答案");
   });
 
-  it("finalize failed 短路分支 → 直接 onFallback", async () => {
+  it("finalizeToNewCard failed 短路 → 直接 onFallback", async () => {
     const { sender, onFallback, card } = setup();
     sender.sendCard.mockResolvedValue({});
     const originalWarn = console.warn;
     console.warn = vi.fn();
     await card.addText("x");
     console.warn = originalWarn;
-    await card.finalize("失败后的答案");
+    await card.finalizeToNewCard("失败后的答案");
     expect(onFallback).toHaveBeenCalledWith("oc_1", "失败后的答案");
   });
 
-  it("finalize 空答案（failed 分支）→ 不 onFallback", async () => {
+  it("finalizeToNewCard 空答案 → 返回 false 不发卡", async () => {
     const { sender, onFallback, card } = setup();
     sender.sendCard.mockResolvedValue({});
     const originalWarn = console.warn;
     console.warn = vi.fn();
     await card.addText("x");
     console.warn = originalWarn;
-    await card.finalize("No response.");
+    expect(await card.finalizeToNewCard("No response.")).toBe(false);
     expect(onFallback).not.toHaveBeenCalled();
   });
 });
@@ -444,7 +443,11 @@ describe("StreamingCard.finalizeToNewCard（★ 卡片改造：独立结果卡�
   it("主过程卡已废（failed）→ 结果直接 onFallback 普通文本，不再试卡片", async () => {
     const { sender, onFallback, card } = setup();
     sender.sendCard.mockResolvedValue({ ok: true }); // doCreate 拿不到 message_id → 置 failed
-    await card.finalize("不会走 update");
+    // ★ G2（2026-10-02）：旧测试经已删除的 finalize() 制造 failed；改为 addText 路径触发同样状态
+    const originalWarn = console.warn;
+    console.warn = vi.fn();
+    await card.addText("触发降级");
+    console.warn = originalWarn;
     expect(await card.finalizeToNewCard("答案")).toBe(false);
     expect(onFallback).toHaveBeenCalledWith("oc_1", "答案");
     expect(sender.updateCard).not.toHaveBeenCalled();

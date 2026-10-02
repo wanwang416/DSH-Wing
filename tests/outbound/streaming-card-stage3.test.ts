@@ -113,10 +113,14 @@ describe("阶段3 B组：飞书卡片质量", () => {
       await card.addTool("工具A");
       const updateCallsBefore = (deps.sender.updateCard as ReturnType<typeof vi.fn>).mock.calls.length;
       expect(updateCallsBefore).toBe(0); // 定时器未到，还没 PATCH
-      await card.finalize("答案A");
+      // ★ G2：finalize() 已删除，收尾统一入口 finalizeToNewCard（内部同样先 closeForFinalize）
+      await card.finalizeToNewCard("答案A");
       const fallbackCalls = (deps.onFallback as ReturnType<typeof vi.fn>).mock.calls.length;
       await vi.runAllTimersAsync(); // 推进时钟：若定时器未被清理，patchFull 会在此触发
-      expect((deps.sender.updateCard as ReturnType<typeof vi.fn>).mock.calls.length).toBe(updateCallsBefore + 1); // 仅 finalize 自己的一次全量
+      // ★ 阿深修正（2026-10-02 验收）：收尾入口已改为 finalizeToNewCard（发独立结果卡，走 sendCard），
+      //   过程卡不再被原地 PATCH → 断言应为"计数不变"。旧断言 `updateCallsBefore + 1` 属 finalize()
+      //   时代语义（当时会把过程卡原地更新为终稿），与本用例标题「不再 PATCH」自相矛盾。
+      expect((deps.sender.updateCard as ReturnType<typeof vi.fn>).mock.calls.length).toBe(updateCallsBefore); // 收尾后不再 PATCH 过程卡
       expect((deps.onFallback as ReturnType<typeof vi.fn>).mock.calls.length).toBe(fallbackCalls); // 无重复 fallback
     } finally {
       vi.useRealTimers();
@@ -128,7 +132,8 @@ describe("阶段3 B组：飞书卡片质量", () => {
     try {
       const deps = makeDeps();
       const card = new StreamingCard("chat1", deps);
-      await card.finalize("答案A");
+      // ★ G2：finalize() 已删除 → finalizeToNewCard（closed 后迟到 addText 被守卫拒绝）
+      await card.finalizeToNewCard("答案A");
       const updateCalls = (deps.sender.updateCard as ReturnType<typeof vi.fn>).mock.calls.length;
       await card.addText("迟到内容".repeat(10)); // 大内容，绕过防抖节流直通 patchAnswer
       await vi.runAllTimersAsync();
