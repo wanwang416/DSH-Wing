@@ -29,7 +29,17 @@ export function utf8Length(text: string): number {
   return Buffer.byteLength(text, "utf8");
 }
 
-/** 按字节上限切分，优先在换行处断，避免切断多字节字符 */
+/**
+ * L5：重试退避延迟 = 基准 500ms × 2^attemptIndex（封顶 4s），叠加 ±20% 抖动。
+ * 独立导出供单测（P0 先例：outbox.backoffDelayMs 同款做法）。
+ */
+export function wecomBackoffDelayMs(attemptIndex: number): number {
+  const base = Math.min(500 * 2 ** attemptIndex, 4000);
+  const jitter = base * 0.4 * (Math.random() - 0.5); // ±20%
+  return Math.max(50, Math.round(base + jitter));
+}
+
+/** 按字节上限切分（纯字节累加，自动避免切断多字节字符——按码点遍历） */
 export function splitMessageByBytes(text: string, limit: number): string[] {
   if (utf8Length(text) <= limit) return [text];
   const out: string[] = [];
@@ -70,6 +80,8 @@ export interface WecomSenderDeps {
   getClient(): WecomClientLike | undefined;
   logger?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
   maxRetries?: number;
+  /** L6：流式条目空闲超时（ms），默认 10 分钟；超时清理残留并 warn */
+  streamIdleTimeoutMs?: number;
 }
 
 export interface WecomStreamHandle {
@@ -81,6 +93,43 @@ export function createWecomSender(deps: WecomSenderDeps) {
   const maxRetries = deps.maxRetries ?? 3;
   /** chatId → 进行中的流式 id（finish 后清除） */
   const activeStreams = new Map<string, string>();
+  /** chatId → 失效帧标记（G3：replyStream 失败即失效，后续走主动推送通道） */
+  const invalidatedFrames = new Set<string>();
+  /** L6：流式空闲超时（ms）——超过即清理 activeStreams 残留并告警 */
+  const STREAM_IDLE_TIMEOUT_MS = deps.streamIdleTimeoutMs ?? 10 * 60_000;
+  /** L6：清理计数（可核对） */
+  let activeStreamCleanups = 0;
+  /** L6：chatId → 最近一次流式活动时间（begin/stream 更新；空闲超时清理用） */
+  const activeStreamSeenAt = new Map<string, number>();
+  /** L6：清理定时器（单例） */
+  let idleSweepTimer: NodeJS.Timeout | null = null;
+
+  /** L6：空闲清理——超时未活动的流式条目移除，防 hasActiveStream 恒 true（turn 卡死场景） */
+  function scheduleIdleSweep(): void {
+    if (idleSweepTimer) return;
+    idleSweepTimer = setTimeout(() => {
+      idleSweepTimer = null;
+      const now = Date.now();
+      for (const [chatId, streamId] of activeStreams) {
+        const seen = activeStreamSeenAt.get(chatId) ?? 0;
+        if (now - seen >= STREAM_IDLE_TIMEOUT_MS) {
+          activeStreams.delete(chatId);
+          activeStreamSeenAt.delete(chatId);
+          activeStreamCleanups += 1;
+          deps.logger?.warn?.(
+            `企微出站：activeStreams 残留清理（空闲超 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)}s，chatId=${chatId}，streamId=${streamId}）；累计清理 ${activeStreamCleanups} 次`,
+          );
+        }
+      }
+      if (activeStreams.size > 0) scheduleIdleSweep();
+    }, STREAM_IDLE_TIMEOUT_MS);
+    if (typeof idleSweepTimer === "object" && "unref" in idleSweepTimer) idleSweepTimer.unref();
+  }
+
+  /** L5：重试退避（导出版 wecomBackoffDelayMs：500ms × 2^i ± 20%，封顶 4s） */
+  function backoffDelayMs(attemptIndex: number): number {
+    return wecomBackoffDelayMs(attemptIndex);
+  }
 
   async function withRetry(fn: () => Promise<unknown>): Promise<unknown> {
     let lastErr: unknown;
@@ -90,8 +139,7 @@ export function createWecomSender(deps: WecomSenderDeps) {
       } catch (err) {
         lastErr = err;
         if (i < maxRetries - 1) {
-          const delay = 500 * (i + 1);
-          await new Promise((r) => setTimeout(r, delay));
+          await new Promise((r) => setTimeout(r, backoffDelayMs(i)));
         }
       }
     }
@@ -108,6 +156,7 @@ export function createWecomSender(deps: WecomSenderDeps) {
 
     /** N1(a)：当前是否有可用的回调帧（无帧 → 流式会降级直发；供上层提前判定避免中途直发） */
     canReply(chatId: string): boolean {
+      if (invalidatedFrames.has(chatId)) return false;
       const c = client();
       return c?.replyFrameFor(chatId) !== undefined;
     },
@@ -123,14 +172,27 @@ export function createWecomSender(deps: WecomSenderDeps) {
       const c = client();
       if (!c) throw new Error("企微客户端未就绪");
       if (!text.trim()) return undefined;
-      const frame = c.replyFrameFor(chatId);
+      // G3：已失效的帧直接用主动推送（不再死磕失效帧）
+      const frame = invalidatedFrames.has(chatId) ? undefined : c.replyFrameFor(chatId);
       if (!frame) return this.sendMarkdown(chatId, text);
       const [head = "", ...rest] = splitMessageByBytes(text, WECOM_STREAM_BYTE_LIMIT);
       // ★ 正向出站日志：成功路径原本静默（SDK debug 关闭），验收时无法拿日志说话
       deps.logger?.info?.(
         `企微出站：帧回复 replyStream ${utf8Length(head)}B${rest.length ? ` + 溢出转主动推送 ${utf8Length(rest.join(""))}B` : ""}`,
       );
-      await withRetry(() => c.replyStream(frame, newStreamId(), head, true));
+      try {
+        await withRetry(() => c.replyStream(frame, newStreamId(), head, true));
+      } catch (err) {
+        // ★ 阿深修正（2026-10-02 验收）：G3 要求"replyStream 失败 → 立即失效该帧 + 同函数内降级"，
+        //   而这里原本**没有 try/catch**（beginStream 与 stream 两处都有）→ 帧失效时会直接抛给上层，
+        //   让普通回复落进 outbox 死信（生产那条 [object Object] 失败项即此类）。
+        //   由 tests/outbound/wecom-sender-stage3.test.ts 的 G3 用例抓到（它断言后续 sendText 走 markdown 通道）。
+        invalidatedFrames.add(chatId);
+        deps.logger?.warn?.(
+          `企微出站：sendText replyStream 失败，失效该帧并降级主动推送: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return this.sendMarkdown(chatId, text); // 用原文整篇推送，不丢内容
+      }
       if (rest.length) await this.sendMarkdown(chatId, rest.join(""));
       return undefined;
     },
@@ -152,11 +214,12 @@ export function createWecomSender(deps: WecomSenderDeps) {
     /**
      * 开启流式回复：首个分片（finish=false）并登记 streamId。
      * 无回调帧 → 降级为 sendMarkdown 终稿（一次性），返回 undefined。
+     * ★ G3：replyStream 失败 → 失效帧 + 降级主动推送，返回 undefined。
      */
     async beginStream(chatId: string, firstChunk: string): Promise<WecomStreamHandle | undefined> {
       const c = client();
       if (!c) throw new Error("企微客户端未就绪");
-      const frame = c.replyFrameFor(chatId);
+      const frame = invalidatedFrames.has(chatId) ? undefined : c.replyFrameFor(chatId);
       if (!frame) {
         await this.sendMarkdown(chatId, firstChunk);
         return undefined;
@@ -164,31 +227,87 @@ export function createWecomSender(deps: WecomSenderDeps) {
       const streamId = newStreamId();
       // 首片按字节上限取，不用 slice 按字符截断（同一单位混用缺陷族）
       const head = splitMessageByBytes(firstChunk, WECOM_STREAM_BYTE_LIMIT)[0] ?? "";
-      await withRetry(() => c.replyStream(frame, streamId, head, false));
+      try {
+        await withRetry(() => c.replyStream(frame, streamId, head, false));
+      } catch (err) {
+        invalidatedFrames.add(chatId);
+        deps.logger?.warn?.(
+          `企微出站：beginStream replyStream 失败，失效该帧并降级主动推送: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        await this.sendMarkdown(chatId, firstChunk);
+        return undefined;
+      }
       deps.logger?.info?.(`企微出站：开启流式 ${utf8Length(head)}B`);
       activeStreams.set(chatId, streamId);
+      activeStreamSeenAt.set(chatId, Date.now());
+      scheduleIdleSweep();
       return { chatId, streamId };
     },
 
-    /** 刷新流式内容；finish=true 结束并清除登记 */
+    /**
+     * 刷新流式内容；finish=true 结束并清除登记。
+     * ★ G1（2026-10-02）：企微 stream 帧是**全量替换**语义（同 streamId 刷新同一条气泡）——
+     *   旧实现对同一 streamId 按 19000B 连发多片 → 前面内容被覆盖丢失（>6000 汉字只剩最后一片）。
+     *   修法：同一 streamId 只发一帧；超上限时复用 sendText 的正确路径（head 走 replyStream +
+     *   溢出转 sendMarkdown），全文不丢。
+     * ★ G3（2026-10-02）：replyStream 失败 → 立即失效该帧 + 降级 sendMarkdown 重发（不再死磕失效帧）。
+     */
     async stream(handle: WecomStreamHandle | undefined, content: string, finish: boolean): Promise<unknown> {
       if (!handle) return undefined; // 已降级为终稿直发
       const c = client();
       if (!c) throw new Error("企微客户端未就绪");
-      const frame = c.replyFrameFor(handle.chatId);
+      const finishAndCleanup = (): void => {
+        if (finish) {
+          activeStreams.delete(handle.chatId);
+          deps.logger?.info?.(`企微出站：流式收尾 ${utf8Length(content)}B`);
+        }
+      };
+      // G3：帧已失效或无帧 → 降级主动推送（不重试同一张帧）
+      const frame = invalidatedFrames.has(handle.chatId) ? undefined : c.replyFrameFor(handle.chatId);
       if (!frame) {
         activeStreams.delete(handle.chatId);
+        deps.logger?.warn?.(`企微出站：无可用回调帧，流式降级主动推送 markdown（${utf8Length(content)}B）`);
         return this.sendMarkdown(handle.chatId, content);
       }
-      const chunks = splitMessageByBytes(content, WECOM_STREAM_BYTE_LIMIT);
-      for (let i = 0; i < chunks.length; i++) {
-        const isLast = i === chunks.length - 1;
-        await withRetry(() => c.replyStream(frame, handle.streamId, chunks[i], finish && isLast)); // R3：仅末片透传 finish
+      if (utf8Length(content) <= WECOM_STREAM_BYTE_LIMIT) {
+        // 常规路径：单帧全量
+        activeStreamSeenAt.set(handle.chatId, Date.now());
+        try {
+          await withRetry(() => c.replyStream(frame, handle.streamId, content, finish));
+          finishAndCleanup();
+          return undefined;
+        } catch (err) {
+          invalidatedFrames.add(handle.chatId);
+          deps.logger?.warn?.(
+            `企微出站：replyStream 失败，失效该帧并降级主动推送: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          finishAndCleanup();
+          return this.sendMarkdown(handle.chatId, content);
+        }
       }
-      if (finish) {
-        activeStreams.delete(handle.chatId);
-        deps.logger?.info?.(`企微出站：流式收尾 ${utf8Length(content)}B`);
+      // G1：内容超单帧上限 → head 走流式气泡 + 溢出转主动推送（全文不丢，绝不连发多片）
+      const [head = "", ...rest] = splitMessageByBytes(content, WECOM_STREAM_BYTE_LIMIT);
+      try {
+        // ★ 阿深修正（2026-10-02 验收）：head 帧必须**照常透传 finish**。
+        //   溢出内容走的是**独立的 sendMarkdown 消息**，不会回填这条气泡，所以 finish 与
+        //   rest.length 无关。原写法 `finish && rest.length === 0` 会让"超限 + finish=true"
+        //   场景**永不发出 finish** → 企微气泡永久停在"生成中"。
+        //   （这一点由既有用例 tests/outbound/wecom-sender.test.ts 的 R3 抓到，当时被误判为
+        //    "G1 语义变更需要改测试"——实际是实现的收尾缺陷。）
+        await withRetry(() => c.replyStream(frame, handle.streamId, head, finish));
+      } catch (err) {
+        invalidatedFrames.add(handle.chatId);
+        deps.logger?.warn?.(
+          `企微出站：replyStream（超限 head）失败，整篇降级主动推送: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        finishAndCleanup();
+        return this.sendMarkdown(handle.chatId, content);
       }
+      if (rest.length) {
+        deps.logger?.info?.(`企微出站：流式超限，溢出 ${utf8Length(rest.join(""))}B 转主动推送（G1：不再连发多片）`);
+        await this.sendMarkdown(handle.chatId, rest.join(""));
+      }
+      finishAndCleanup();
       return undefined;
     },
 
