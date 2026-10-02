@@ -39,14 +39,21 @@ export function createBatching(deps: BatchingDeps = {}) {
   const batches = new Map<string, { items: BatchItem[]; openedAt: number; timer?: ReturnType<typeof setTimeout> }>();
 
   return {
-    /** 加入一条消息；返回 true=已合并（无需单独处理），false=应 flush 后单独处理（超限） */
+    /** 加入一条消息；返回 true=已合并/已整批投递（无需单独处理） */
     add(chatId: string, item: BatchItem): boolean {
       const existing = batches.get(chatId);
       if (existing) {
         existing.items.push(item);
         if (existing.items.length >= cfg.maxCount || totalChars(existing.items) >= cfg.maxChars) {
-          this.flush(chatId);
-          return false; // 超限：调用方重新单独入队
+          // ★ P0 修复（2026-10-02）：满员分支必须把整批交给 onFlush 并返回 true。
+          //   旧实现丢弃 flush 返回值后 return false → 批次内前 maxCount-1 条被静默丢弃
+          //   （未去重、未落 WAL、无日志）。当前这条已 push 进 items 尾部，flush 整批
+          //   （含它）交给 onFlush（index.ts 用 items 最后一条的 messageId 投递，同一条
+          //   不会重复），所以返回 true 让调用方不再单独处理——若返回 false，调用方会用
+          //   同一 messageId 再处理一次，两条路径争抢、整批被去重拦掉，前 7 条仍然丢失。
+          const items = this.flush(chatId);
+          if (items) deps.onFlush?.(chatId, items);
+          return true;
         }
         return true;
       }

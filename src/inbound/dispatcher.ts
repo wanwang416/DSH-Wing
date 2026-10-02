@@ -44,6 +44,30 @@ export function createDispatcher(deps: DispatcherDeps) {
     },
 
     /**
+     * ★ P0-2（2026-10-02）：WAL 崩溃补发专用入口——跳过去重闸门。
+     *   凡进 WAL 的 messageId 必定已在去重表里（dedupe TTL 24h > WAL 重放窗口），
+     *   旧实现 WAL 重放走 handleEvent → 必然命中 isDuplicate 被拦 → 100% 空转，
+     *   日志却谎报"重放 N 条"。对齐基底 lark-link message-handler.ts:302
+     *   `if (!compensated && !deps.dedupe.add(...))`：补偿重放不做去重。
+     *   返回 "processed" | "failed" | "dropped"，供上层区分计数（不许假成功）。
+     */
+    async handleCompensated(event: string, data: unknown): Promise<"processed" | "failed" | "dropped"> {
+      if (event !== EVENT_MESSAGE) return "dropped";
+      const raw = data as any;
+      const messageId = raw?.message?.message_id ?? raw?.message_id;
+      if (!messageId) return "dropped";
+      const msg = parseInboundMessage(raw, deps.botOpenId());
+      if (!msg) return "dropped"; // 非 text 或解析失败
+      try {
+        await deps.handleInbound(msg);
+        return "processed";
+      } catch (err) {
+        deps.logger?.error?.(`handleInbound 失败: ${err instanceof Error ? err.message : String(err)}`);
+        return "failed";
+      }
+    },
+
+    /**
      * ★ 企微线路入口：消息已在平台侧解析成 ParsedMessage（wecom-parser），
      * 跳过飞书事件解析，直接去重 + 进 handleInbound。
      */

@@ -71,7 +71,7 @@ import { createTurnSupervisor } from "./agent/turn-supervisor.js";
 import { createSender } from "./outbound/sender.js";
 import { createWecomSender } from "./outbound/wecom-sender.js";
 import { WecomStreamCard } from "./outbound/wecom-stream-card.js";
-import { createOutbox } from "./outbound/outbox.js";
+import { createOutbox, describeError } from "./outbound/outbox.js";
 import { StreamingCard } from "./outbound/streaming-card.js";
 import { createReactionManager } from "./interactive/reaction.js";
 
@@ -190,12 +190,15 @@ export function apply(ctx: any, rawConfig: unknown): void {
         }
         return { ok: true };
       } catch (err) {
-        return { ok: false, retryable: true, error: err instanceof Error ? err.message : String(err) };
+        return { ok: false, retryable: true, error: describeError(err) };
       }
     },
     onStatsChange: (stats) => {
       status.refreshCounters({ outboxPending: stats.pending, outboxFailed: stats.failed });
     },
+    // ★ P0-4（2026-10-02）：显式对齐基底（config.ts:126-130 maxAttempts:50）——
+    //   旧实现未传，缺省 3 次 × 固定 2s ≈ 10.9s 内判死，限流窗口内必然丢消息（真机丢 3 条）
+    maxRetries: 50,
     logger,
   });
 
@@ -1084,26 +1087,40 @@ export function apply(ctx: any, rawConfig: unknown): void {
       // 4) 轮次监督
       turnSupervisor.start();
       // 5) 入站 WAL 重放（崩溃补发）
+      // ★ P0-2（2026-10-02）：改走 dispatcher.handleCompensated（跳过去重）——
+      //   旧实现走 handleEvent，凡进 WAL 的 messageId 必已在其去重表里（TTL 24h > 重放窗口），
+      //   100% 被 isDuplicate 拦死，replayed 却照加、日志谎报"重放 N 条"。
+      //   replayed 只在 handleInbound 真正成功后计数；failed/skipped 分开计数并打全三个数。
       inboundWal.prune();
       let replayed = 0;
+      let replayFailed = 0;
+      let replaySkipped = 0;
       for (const rec of inboundWal.pendingReplays()) {
-        if (!inboundWal.markReplay(rec.messageId)) continue;
-        try {
-          await dispatcher.handleEvent("im.message.receive_v1", {
-            message: {
-              message_id: rec.messageId,
-              chat_id: rec.chatId,
-              chat_type: rec.chatType,
-              message_type: "text",
-              content: JSON.stringify({ text: rec.text }),
-            },
-          });
+        if (!inboundWal.markReplay(rec.messageId)) {
+          replaySkipped += 1;
+          continue;
+        }
+        const outcome = await dispatcher.handleCompensated("im.message.receive_v1", {
+          message: {
+            message_id: rec.messageId,
+            chat_id: rec.chatId,
+            chat_type: rec.chatType,
+            message_type: "text",
+            content: JSON.stringify({ text: rec.text }),
+          },
+        });
+        if (outcome === "processed") {
           replayed += 1;
-        } catch (err) {
-          logger.warn?.(`WAL 重放失败 ${rec.messageId}: ${err instanceof Error ? err.message : String(err)}`);
+        } else if (outcome === "failed") {
+          replayFailed += 1;
+          logger.warn?.(`WAL 重放失败 ${rec.messageId}: handleInbound 未成功（state=replayed，超次前仍可补发）`);
+        } else {
+          replaySkipped += 1;
         }
       }
-      if (replayed > 0) logger.info?.(`入站 WAL 重放 ${replayed} 条`);
+      if (replayed > 0 || replayFailed > 0 || replaySkipped > 0) {
+        logger.info?.(`入站 WAL 重放：成功 ${replayed} / 失败 ${replayFailed} / 跳过 ${replaySkipped}`);
+      }
       status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
       // 6) 连接监督启动（含 WS 连接 + 探活 + 自动重连）
       await supervisor.start();

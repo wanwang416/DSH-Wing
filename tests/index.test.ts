@@ -416,7 +416,7 @@ describe("index.ts apply 集成（M4 覆盖重构）", () => {
     h.walReplace([{ messageId: "om_w1", chatId: "ou_1", chatType: "p2p", text: "重放文本" }]);
     const ctx = makeCtx();
     await startBridge(ctx);
-    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("入站 WAL 重放 1 条")));
+    await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("入站 WAL 重放：成功 1 / 失败 0 / 跳过 0")));
   });
 
   it("startBridge：WAL 重放跳过（markReplay false）→ 不计数", async () => {

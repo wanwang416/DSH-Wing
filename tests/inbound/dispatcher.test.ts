@@ -80,3 +80,30 @@ describe("createDispatcher（入站分发）", () => {
     expect(deps.logger.error).toHaveBeenCalledWith(expect.stringContaining("handleInbound 失败"));
   });
 });
+
+describe("createDispatcher.handleCompensated（WAL 补偿重放专用，P0 施工项 2）", () => {
+  it("命中去重表也照常处理（跳过 isDuplicate/add）", async () => {
+    const deps = makeDeps({ dedupe: { isDuplicate: vi.fn().mockReturnValue(true), add: vi.fn().mockReturnValue(false) } });
+    const outcome = await createDispatcher(deps).handleCompensated("im.message.receive_v1", textMsg("om_c1"));
+    expect(deps.dedupe.isDuplicate).not.toHaveBeenCalled();
+    expect(deps.dedupe.add).not.toHaveBeenCalled();
+    expect(deps.handleInbound).toHaveBeenCalledTimes(1);
+    expect(outcome).toBe("processed");
+  });
+
+  it("handleInbound 抛错 → 返回 failed（不抛出，供上层计数）", async () => {
+    const deps = makeDeps({ handleInbound: vi.fn().mockRejectedValue(new Error("replay boom")) });
+    const outcome = await createDispatcher(deps).handleCompensated("im.message.receive_v1", textMsg("om_c2"));
+    expect(outcome).toBe("failed");
+    expect(deps.logger.error).toHaveBeenCalledWith(expect.stringContaining("handleInbound 失败"));
+  });
+
+  it("非 message 事件 / 无 message_id / 解析失败 → dropped", async () => {
+    const deps = makeDeps() as any;
+    const d = createDispatcher(deps);
+    expect(await d.handleCompensated("card.action.trigger", {})).toBe("dropped");
+    expect(await d.handleCompensated("im.message.receive_v1", { message: {} })).toBe("dropped");
+    expect(await d.handleCompensated("im.message.receive_v1", { message: { message_id: "om_c3" } })).toBe("dropped");
+    expect(deps.handleInbound).not.toHaveBeenCalled();
+  });
+});

@@ -37,8 +37,11 @@ export interface WingLarkClient {
   /** ★ M3 任务 2：CardKit 流式更新 main_text 元素（PUT，打字机动画） */
   streamMessageContent?(cardId: string, content: string, sequence: number): Promise<unknown>;
   addReaction(params: { message_id: string; emoji_type: string }): Promise<unknown>;
-  /** 拉取会话消息（丢消息补偿用，M2） */
-  listMessages?(params: Record<string, unknown>): Promise<Array<{ messageId: string; timestampMs: number }>>;
+  /** 拉取会话消息（丢消息补偿用，M2）。
+   * ★ P0-3（2026-10-02）：返回结构扩展 text 字段（item.body.content 是 JSON 字符串，
+   *   形如 {"text":"..."}）。旧实现拿不到正文 → index.ts reinject 第一句 `if (!msg.text)`
+   *   必拦 → 补偿 100% 空转却报"补拉 N 条"。listMessages 目前只被补偿使用，扩展安全。 */
+  listMessages?(params: Record<string, unknown>): Promise<Array<{ messageId: string; timestampMs: number; text?: string }>>;
   /** WS 连接状态（SDK getConnectionStatus 透出，诊断用） */
   connectionStatus?(): unknown;
   /** WS 是否已就绪（SDK onReady 触发后才 true） */
@@ -193,10 +196,22 @@ export function buildLarkClient(opts: {
       const res = (await sdkClient.im.message.list({
         params: { ...params, page_size: 50 } as never,
       })) as any;
-      return (res?.items ?? res?.data?.items ?? []).map((i: any) => ({
-        messageId: i.message_id,
-        timestampMs: Number(i.create_time ?? 0),
-      }));
+      // ★ P0-3（2026-10-02）：解析 item.body.content（JSON 字符串 {"text":"..."}）取正文，
+      //   供丢消息补偿 reinject 使用；解析失败 text 为 undefined（上层 warn 并跳过，不假成功）
+      return (res?.items ?? res?.data?.items ?? []).map((i: any) => {
+        let text: string | undefined;
+        try {
+          const body = typeof i.body?.content === "string" ? JSON.parse(i.body.content) : i.body?.content;
+          if (body && typeof body.text === "string") text = body.text;
+        } catch {
+          // 非 JSON 正文（post/interactive 等）→ text undefined，上层按"拿不到正文"处理
+        }
+        return {
+          messageId: i.message_id,
+          timestampMs: Number(i.create_time ?? 0),
+          text,
+        };
+      });
     },
     connectionStatus() {
       return (wsClient as unknown as { getConnectionStatus?: () => unknown }).getConnectionStatus?.();

@@ -15,9 +15,12 @@ export interface CompensatedMessage {
   senderOpenId?: string;
 }
 
+/** listMessages 返回条目：P0-3 起带 text（拿不到正文为 undefined） */
+export type CompensatableItem = { messageId: string; timestampMs: number; text?: string };
+
 export interface CompensationDeps {
   routes: RouteStore;
-  listMessages(params: { chatId: string; startTimeMs: number; endTimeMs: number }): Promise<Array<{ messageId: string; timestampMs: number }>>;
+  listMessages(params: { chatId: string; startTimeMs: number; endTimeMs: number }): Promise<CompensatableItem[]>;
   reinject(msg: CompensatedMessage): Promise<void>;
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
   replayWindowMs?: number;
@@ -54,6 +57,7 @@ export function createMissedCompensation(deps: CompensationDeps) {
       const until = now();
       const since = until - windowMs;
       let pulled = 0;
+      let noText = 0;
       for (const route of deps.routes.all()) {
         if (deps.isWecomRoute?.(route)) continue; // ★ 企微路由不进飞书补偿通道（真机 429 根因）
         try {
@@ -64,15 +68,23 @@ export function createMissedCompensation(deps: CompensationDeps) {
           });
           for (const item of items) {
             if (delivered.has(item.messageId)) continue;
-            delivered.add(item.messageId); // 防止重复 reinject
+            // ★ P0-3（2026-10-02）：拿不到正文不 reinject、不计数、不标记已投递——
+            //   旧实现恒传 text:"" → reinject 第一句必拦，pulled 照加谎报"补拉 N 条"。
+            if (!item.text) {
+              noText += 1;
+              deps.logger?.warn?.(`补偿跳过 ${item.messageId}：listMessages 拿不到正文（post/卡片或未解析），已跳过 ${noText} 条`);
+              continue;
+            }
             try {
               await deps.reinject({
                 messageId: item.messageId,
                 chatId: route.chatId,
                 chatType: route.chatType,
-                text: "",
+                text: item.text,
                 senderOpenId: undefined,
               });
+              // ★ P0-3：delivered.add 移到 reinject 成功之后——失败不标记，下轮恢复可重试
+              delivered.add(item.messageId);
               pulled += 1;
             } catch (err) {
               deps.logger?.warn?.(`补偿 reinject 失败 ${item.messageId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -82,7 +94,9 @@ export function createMissedCompensation(deps: CompensationDeps) {
           deps.logger?.warn?.(`补偿 listMessages 失败（${route.chatId}）: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      // ★ 不许假成功：pulled 与 skipped 分开计数，skipped>0 必打 warn
       if (pulled > 0) deps.logger?.info?.(`丢消息补偿：补拉 ${pulled} 条`);
+      if (noText > 0) deps.logger?.warn?.(`丢消息补偿：${noText} 条因拿不到正文被跳过（未计入补拉数）`);
     },
   };
 }

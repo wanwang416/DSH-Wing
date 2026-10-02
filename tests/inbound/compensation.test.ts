@@ -40,13 +40,13 @@ describe("createMissedCompensation（丢消息补偿）", () => {
     // 不崩即可（prune 后 set 大小 2500）
   });
 
-  it("onRecovered：补拉断连窗口消息 → reinject + info", async () => {
+  it("onRecovered：补拉断连窗口消息 → reinject + info（P0-3 起条目需带 text）", async () => {
     const clock = makeClock();
     const deps = makeDeps() as any;
     deps.routes.all.mockReturnValue([{ chatId: "oc_1", chatType: "group" }]);
     deps.listMessages.mockResolvedValue([
-      { messageId: "om_new1", timestampMs: 100 },
-      { messageId: "om_new2", timestampMs: 200 },
+      { messageId: "om_new1", timestampMs: 100, text: "补拉甲" },
+      { messageId: "om_new2", timestampMs: 200, text: "补拉乙" },
     ]);
     const c = createMissedCompensation({ ...deps, now: clock.now });
     await c.onRecovered();
@@ -62,7 +62,7 @@ describe("createMissedCompensation（丢消息补偿）", () => {
   it("onRecovered：reinject 抛错 → warn 不中断", async () => {
     const deps = makeDeps() as any;
     deps.routes.all.mockReturnValue([{ chatId: "oc_1", chatType: "group" }]);
-    deps.listMessages.mockResolvedValue([{ messageId: "om_a", timestampMs: 1 }]);
+    deps.listMessages.mockResolvedValue([{ messageId: "om_a", timestampMs: 1, text: "要补的" }]);
     deps.reinject.mockRejectedValue(new Error("reinject boom"));
     const c = createMissedCompensation(deps);
     await c.onRecovered();
@@ -96,6 +96,49 @@ describe("createMissedCompensation（丢消息补偿）", () => {
     const c = createMissedCompensation(deps);
     await c.onRecovered();
     expect(deps.logger.info).not.toHaveBeenCalledWith(expect.stringContaining("丢消息补偿"));
+  });
+
+  it("listMessages 返回带 text 的条目 → reinject 收到非空 text 且 pulled 计数正确（P0 施工项 3，验收 A）", async () => {
+    const deps = makeDeps() as any;
+    deps.routes.all.mockReturnValue([{ chatId: "oc_1", chatType: "group" }]);
+    deps.listMessages.mockResolvedValue([
+      { messageId: "om_t1", timestampMs: 1, text: "补拉正文甲" },
+      { messageId: "om_t2", timestampMs: 2, text: "补拉正文乙" },
+    ]);
+    const c = createMissedCompensation(deps);
+    await c.onRecovered();
+    expect(deps.reinject).toHaveBeenCalledTimes(2);
+    expect(deps.reinject.mock.calls[0][0]).toEqual(expect.objectContaining({ messageId: "om_t1", text: "补拉正文甲" }));
+    expect(deps.reinject.mock.calls[1][0]).toEqual(expect.objectContaining({ messageId: "om_t2", text: "补拉正文乙" }));
+    expect(deps.logger.info).toHaveBeenCalledWith(expect.stringContaining("补拉 2 条"));
+  });
+
+  it("listMessages 返回空 text → pulled 不增加 + warn（抓假成功，P0 施工项 3）", async () => {
+    const deps = makeDeps() as any;
+    deps.routes.all.mockReturnValue([{ chatId: "oc_1", chatType: "group" }]);
+    deps.listMessages.mockResolvedValue([
+      { messageId: "om_e1", timestampMs: 1, text: "" },
+      { messageId: "om_e2", timestampMs: 2 }, // 无 text 字段（旧返回形状）
+    ]);
+    const c = createMissedCompensation(deps);
+    await c.onRecovered();
+    expect(deps.reinject).not.toHaveBeenCalled();
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("拿不到正文"));
+    expect(deps.logger.info).not.toHaveBeenCalledWith(expect.stringContaining("补拉")); // 不许假成功日志
+  });
+
+  it("delivered.add 移到 reinject 成功之后：reinject 失败不标记、下轮可重试（P0 施工项 3）", async () => {
+    const deps = makeDeps() as any;
+    deps.routes.all.mockReturnValue([{ chatId: "oc_1", chatType: "group" }]);
+    deps.listMessages.mockResolvedValue([{ messageId: "om_r1", timestampMs: 1, text: "要补的" }]);
+    deps.reinject.mockRejectedValueOnce(new Error("reinject boom")); // 第一次失败
+    const c = createMissedCompensation(deps);
+    await c.onRecovered();
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("补偿 reinject 失败"));
+    // 第二轮恢复：同一 messageId 未被 delivered 挡住 → 再次 reinject
+    deps.reinject.mockResolvedValueOnce(undefined);
+    await c.onRecovered();
+    expect(deps.reinject).toHaveBeenCalledTimes(2);
   });
 
   it("★ 真机回归：企微路由被跳过，不拿企微 chatId 去调飞书 listMessages（429 根因）", async () => {
