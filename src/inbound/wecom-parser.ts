@@ -4,6 +4,8 @@
  * 关键设计（与飞书 parser 对齐，输出同构对象，直接进 handleInbound）：
  *   - 单聊（chattype=single）：chatId = from.userid → 直通 handleInbound（p2p 永不过滤）
  *   - 群聊（chattype=group）：chatId = chatid → 走现有 groupPolicy（mention 策略）
+ *     ★ G5（批次 3）实注：该判定在 index.ts 企微入口 onMessage 内接线（此前注释与实现
+ *     矛盾——判定根本不存在，mention 策略对企微完全失效）；p2p 恒不过滤
  *   - 企微无结构化 mentions 字段：群聊 @ 机器人表现为文本 "@机器人名 xxx"，提取为 mentions
  *     供 stripMentions 剥除前缀；文本中间 @ 保留原样
  *   - voice 已由企微服务端转文本（voice.content），走文本路径

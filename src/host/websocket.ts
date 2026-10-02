@@ -208,8 +208,8 @@ export function createTransport(deps: TransportDeps) {
       lock?.release();
       lock = undefined;
     },
-    wsReady: () => wsReadyFlag,
-    isConnected: () => started && wsReadyFlag,
+    wsReady: () => deps.getClient()?.isWsReady?.() ?? wsReadyFlag,
+    isConnected: () => started && (deps.getClient()?.isWsReady?.() ?? wsReadyFlag),
     botOpenId: () => botOpenId,
     /** 最近收到 WS 事件的时间（0=从未收到） */
     lastEventAt: () => lastEventAt,

@@ -30,7 +30,7 @@ interface ReqLike {
 
 export interface WingPanelDeps {
   /** 桥状态（status.get()） */
-  status: { get(): { connState: string; outboxPending: number; outboxFailed: number; inboundPending: number; sessions: number; wsReady: boolean; connectedAt?: number } };
+  status: { get(): { connState: string; outboxPending: number; outboxFailed: number; inboundPending: number; sessions: number; wsReady: boolean; connectedAt?: number; wecomConnState?: "disconnected" | "connected" | null; wecomReady?: boolean | null } };
   /** 凭据解析（判断是否已配置） */
   resolveCredential(): Promise<{ appId?: string } | undefined>;
   /** setup 核心流程（start / getActiveQr / isBusy） */
@@ -79,6 +79,8 @@ export function createWingPanel(deps: WingPanelDeps) {
               appId: maskAppId(cred?.appId),
               connState: st.connState,
               wsReady: st.wsReady,
+              wecomConnState: st.wecomConnState ?? null,
+              wecomReady: st.wecomReady ?? null,
               outboxPending: st.outboxPending,
               outboxFailed: st.outboxFailed,
               inboundPending: st.inboundPending,

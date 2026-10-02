@@ -1043,6 +1043,15 @@ export function apply(ctx: any, rawConfig: unknown): void {
       // D2/A：botName 精确触发群聊 @ 机器人名；未配置时 parser 内维持宽松并提示
       const msg = parseWecomInbound(frame.body as any, { botName: wc.botName });
       if (!msg) return;
+      // ★ G5（批次 3）：企微群聊走与飞书侧同一套 group-policy（index.ts:748 同源）。
+      //   旧实现完全没有群策略判定 → groupPolicy: mention 对企微失效，群里任何非寒暄
+      //   消息都触发 agent 刷屏烧算力（体检 G5；wecom-parser.ts:5-7 注释与实现矛盾）。
+      //   shouldProcessGroupMessage 的 mention 分支已含企微适配（@ 任何成员即命中）；
+      //   p2p 恒 true，私聊主场景不受影响。
+      if (msg.chatType === "group" && !groupPolicy.shouldProcess(msg)) {
+        logger.info?.(`企微群消息被群策略过滤（policy=${(cfg as { groupPolicy?: string }).groupPolicy}）chat=${msg.chatId}`);
+        return;
+      }
       // S5：首条群聊消息诊断日志（核对 botName 与企微后台显示名是否一致；进程内一次）
       if (msg.chatType === "group" && consumeWecomGroupDiag()) {
         logger.info?.(`企微首条群聊 diag: chat=${msg.chatId} mentions=${JSON.stringify(msg.mentions)} raw="${msg.rawText.slice(0, 80)}"`);
@@ -1058,7 +1067,14 @@ export function apply(ctx: any, rawConfig: unknown): void {
         void client.replyWelcome(frame, { msgtype: "text", text: { content: wc.welcomeText } }).catch(() => void 0);
       }
     });
-    client.onConnState((connected) => logger.info?.(`企微连接 ${connected ? "已认证" : "断开/重连中"}`));
+    // ★ G4（批次 3）：企微连接状态写入 status.json（旧实现只写日志，面板完全看不出企微死活）
+    client.onConnState((connected) => {
+      logger.info?.(`企微连接 ${connected ? "已认证" : "断开/重连中"}`);
+      status.update({
+        wecomConnState: connected ? "connected" : "disconnected",
+        wecomReady: connected,
+      });
+    });
     wecomClient = client;
     await client.start();
     logger.info?.("企微线路已启动（长连接模式）");
@@ -1080,6 +1096,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
         appSecret: cred.appSecret,
         domain: cred.domain,
         logger,
+        // ★ 批次 3 施工项 1（G15）：SDK WS 状态回调接进 supervisor——
+        //   旧实现没传此参数，四个回调全部无人接收，supervisor 的 wsReady()/isConnected()
+        //   永远反映启动那一刻的快照（体检 G15 根因）。
+        onWsState: (s, d) => supervisor.notifyWsState(s, d),
       });
       // 3) outbox 重建 + 启动
       outbox.rebuildFromDisk();

@@ -109,35 +109,30 @@ export function createConnectionSupervisor(deps: SupervisorDeps) {
       }
       return;
     }
-    let ok = false;
-    try {
-      ok = await Promise.race([deps.transport.probe(), sleep(deps.cfg.probeTimeoutMs).then(() => false)]);
-    } catch {
-      ok = false;
-    }
+    // ★ 批次 3 施工项 2（G15 配套）：健康判据从"REST 探活"改为"本地状态"——
+    //   isConnected()/wsReady() 在 G15 接线后是 SDK 实时值（onWsState 驱动），不再调用
+    //   transport.probe()（原实现每 30s 一次真实 API GET /bot/v3/info，2,880 次/天，
+    //   且 WS 假死时 HTTP 往往正常、拦不住它想拦的场景）。
+    //   字段名保留 lastProbeAt/lastProbeOk（面板与前端读它），语义已改为"本地健康判定"。
+    const ok = deps.transport.isConnected();
     deps.status.update({ lastProbeAt: now(), lastProbeOk: ok, wsReady: deps.transport.wsReady() });
     if (ok) {
       probeFailStreak = 0;
-      // ★ 连接活性检测：probe OK + WS 未连接 + 长时间无事件 → 主动重连
-      //   （哈马 2026-08-29 收尾项：空闲会话无 WS 事件是正常现象（飞书不会主动推消息），
-      //   连接正常时不应触发重连——原逻辑每 30s tick 都报「疑似假死主动重连」噪音；
-      //   真断连由 probe 失败链 + SDK watchdog（120s ping）兜底。彻底删除该启发式属
-      //   P0-4 范畴，此处只修噪音不越界。）
-      const lastEvent = deps.transport.lastEventAt?.() ?? now();
-      if (lastConnectedAt > 0 && now() - lastEvent > 120_000 && !deps.transport.isConnected()) {
-        setState("degraded", "长时间无 WS 事件，疑似连接假死，主动重连");
-        await ensureConnected();
-        return;
-      }
-      if (!deps.transport.isConnected()) {
-        reconnectAttempts = 0;
-        await ensureConnected();
-      } else if (state !== "connected") setState("connected");
+      if (state !== "connected") setState("connected");
       return;
     }
+    // ★ 阿深 2026-10-02（验收修正）：判据换成"本地状态"后，原来两处启发式变成**死分支**——
+    //   ① 原「疑似假死」检查要求 `!isConnected()`，但它位于 `if (ok)` 内，而 `ok === isConnected()`
+    //      → 条件自相矛盾，永不执行；
+    //   ② 原「探活失败 N 次」检查要求 `isConnected()`，而 `probeFailStreak` 只在 `!isConnected()`
+    //      时递增 → 同样永不执行。
+    //   （施工方把测试断言改绿的过程中，这两处死分支被掩盖成了"测试语义不符"。）
+    //   按新语义收敛：连接已断（SDK 实时值）就是**事实**而非"疑似"，无需推测；连续 N 次确认后
+    //   标 degraded 并走受 quota 熔断约束的重连。真实假死由 SDK watchdog（120s ping +
+    //   `pingTimeout: 60`）与 onWsState 回调负责——原注释亦已声明该启发式属待删的噪音源。
     probeFailStreak += 1;
     if (probeFailStreak >= deps.cfg.probeFailThreshold) {
-      if (deps.transport.isConnected()) setState("degraded", `探活失败 ${probeFailStreak} 次`);
+      setState("degraded", `WS 连接中断（连续 ${probeFailStreak} 次检测）`);
       await ensureConnected();
     }
   }
@@ -161,6 +156,35 @@ export function createConnectionSupervisor(deps: SupervisorDeps) {
       await tick();
     },
     state: () => state,
+    /**
+     * ★ 批次 3 施工项 1（G15）：SDK WS 状态回调驱动状态机——不再等 30 秒轮询发现。
+     *   由 buildLarkClient 的 onWsState（onReady/onError/onReconnecting/onReconnected）调用。
+     *   - ready / reconnected → 重置 reconnectAttempts 与 probeFailStreak，setState("connected")
+     *   - reconnecting        → setState("reconnecting")
+     *   - error               → setState("degraded", detail) 并触发 ensureConnected()
+     *   不破坏 quota 熔断：error → ensureConnected 内部仍受 tripped()/quarantined 语义约束。
+     */
+    notifyWsState(wsState: string, detail?: string): void {
+      if (stopped) return;
+      if (wsState === "ready" || wsState === "reconnected") {
+        reconnectAttempts = 0;
+        probeFailStreak = 0;
+        lastConnectedAt = now();
+        if (state !== "connected") setState("connected");
+        return;
+      }
+      if (wsState === "reconnecting") {
+        if (state !== "reconnecting") setState("reconnecting", detail);
+        return;
+      }
+      if (wsState === "error") {
+        setState("degraded", detail);
+        void ensureConnected().catch(() => void 0);
+        return;
+      }
+      // 未知状态：记日志不猜（不许静默吞）
+      deps.logger?.warn?.(`notifyWsState：未知 WS 状态 "${wsState}"，忽略`);
+    },
     async reconnect(): Promise<void> {
       reconnectAttempts = 0;
       deps.quota.reset();

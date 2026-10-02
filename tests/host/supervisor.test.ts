@@ -126,7 +126,7 @@ describe("createConnectionSupervisor", () => {
     await s.stop();
   });
 
-  it("tick：probe ok + 最近有事件 → 保持 connected", async () => {
+  it("tick：isConnected=true + 最近有事件 → 保持 connected（probe 已退役，判据=本地状态）", async () => {
     const transport = makeTransport({
       isConnected: vi.fn().mockReturnValueOnce(false).mockReturnValue(true),
       lastEventAt: () => 0,
@@ -141,59 +141,63 @@ describe("createConnectionSupervisor", () => {
     await s.stop();
   });
 
-  it("tick：probe ok + WS 未连接 + 长时间无事件 → 假死 degraded → 主动重连", async () => {
+  it("tick：isConnected=false 连续达阈值 → degraded「WS 连接中断」并重连（SDK 实时值）", async () => {
+    let connected = true;
     const transport = makeTransport({
-      // start 时 false→true（连接成功）；tick 时兜底 false（WS 已断）
-      isConnected: vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true).mockReturnValue(false),
+      isConnected: () => connected, // tick 时兜底 false（WS 已断，SDK 实时值）
       lastEventAt: () => 0, // 从未收到事件
     });
-    const { logger, s } = makeSupervisor({ transport });
+    const { logger, s } = makeSupervisor({ transport, cfg: { ...BASE_CFG, probeFailThreshold: 2 } });
     await s.start(); // 连接成功（设 lastConnectedAt）
-    await s.tick(); // probe ok + isConnected=false + 无事件 → 假死重连
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("假死"));
+    connected = false; // 模拟 SDK 断线（G15 后 isConnected 是实时值）
+    await s.tick(); // streak=1 → 未达阈值，不误报
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("WS 连接中断"));
+    await s.tick(); // streak=2 → 达阈值
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("WS 连接中断"));
     await s.stop();
   });
 
-  it("tick：probe ok + WS 连接正常 + 空闲无事件 → 不触发假死重连（哈马收尾项：空闲会话无事件是正常现象）", async () => {
+  it("tick：isConnected=true + 空闲无事件 → 不触发重连（空闲会话无事件是正常现象）", async () => {
     const transport = makeTransport({
       isConnected: vi.fn().mockReturnValueOnce(false).mockReturnValue(true), // start 连上后始终连接正常
       lastEventAt: () => 0, // 从未收到事件（空闲）
     });
     const { logger, s } = makeSupervisor({ transport });
     await s.start(); // 连接成功
-    await s.tick(); // probe ok + isConnected=true + 无事件 → 不重连（修复前每 tick 都触发噪音）
-    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("假死"));
+    await s.tick(); // isConnected=true + 无事件 → 不重连
+    // ★ 原断言是 not.toHaveBeenCalledWith("假死")，而该文案已随启发式删除 → 会变成永真；改为断言当前真实文案
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("WS 连接中断"));
     expect(s.state()).toBe("connected");
     await s.stop();
   });
 
-  it("tick：probe 连续失败达阈值 → degraded → 重连", async () => {
+  it("tick：isConnected 连续失败达阈值 → degraded「WS 连接中断」→ 重连（判据=本地状态，probe 已退役）", async () => {
     const transport = makeTransport({
-      isConnected: () => true, // 连接保持，但探活 API 失败
+      isConnected: () => false, // SDK 实时值：连接已断
       lastEventAt: () => 0,
-      probe: vi.fn().mockResolvedValue(false),
+      probe: vi.fn().mockResolvedValue(true), // ★ 新实现不再调用（下线证明）
     });
     const { logger, s } = makeSupervisor({ transport, cfg: { ...BASE_CFG, probeFailThreshold: 2 } });
     await s.start();
     await s.tick(); // streak=1
-    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("探活失败 2 次"));
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("WS 连接中断"));
     await s.tick(); // streak=2 → 达阈值
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("探活失败 2 次"));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("WS 连接中断（连续 2 次检测）"));
+    expect((transport.probe as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
     await s.stop();
   });
 
-  it("tick：probe 超时（race 返回 false）→ 计失败", async () => {
+  it("tick：连接未就绪 → lastProbeOk=false，且不再等待 probe 超时（探活已退役）", async () => {
     const transport = makeTransport({
-      probe: vi.fn().mockImplementation(() => new Promise(() => {})), // 永不 resolve
+      probe: vi.fn().mockImplementation(() => new Promise(() => {})), // 若仍被调用会永久挂住
       isConnected: vi.fn().mockReturnValue(false),
       lastEventAt: () => 0,
     });
-    const { status, s } = makeSupervisor({ transport });
+    const { status, s } = makeSupervisor({ transport, cfg: { ...BASE_CFG, probeFailThreshold: 99 } });
     await s.start();
-    const p = s.tick();
-    await vi.advanceTimersByTimeAsync(8_000); // 超时
-    await p;
+    await s.tick(); // ★ 不需要 advanceTimersByTimeAsync：新实现根本不 await probe（旧实现要等 8s 超时）
     expect(status.update).toHaveBeenCalledWith(expect.objectContaining({ lastProbeOk: false }));
+    expect((transport.probe as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
     await s.stop();
   });
 

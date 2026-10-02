@@ -19,6 +19,10 @@ export interface WecomClientOptions {
   secret: string;
   wsUrl?: string;
   logger?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
+  /** ★ G4（批次 3）：透传 SDK WSClient.maxReconnectAttempts（默认 10，-1=无限重连） */
+  maxReconnectAttempts?: number;
+  /** 测试注入用：自定义 WSClient 工厂（生产不传，走真实 SDK） */
+  wsClientFactory?: (options: Record<string, unknown>) => unknown;
 }
 
 export interface WecomClientHandlers {
@@ -75,18 +79,27 @@ export function createWecomClient(opts: WecomClientOptions) {
       started = true;
       const logger = opts.logger;
 
-      const client = new WSClient({
+      // ★ G4（批次 3）：maxReconnectAttempts 传 -1 = 无限重连（SDK 自带 1s→30s 指数退避，
+      //   不会形成重连风暴）。旧实现用 SDK 默认 10 次，约 3 分钟断网后 SDK 抛
+      //   WSReconnectExhaustedError，本层只写日志不重建 → 企微线静默永久死亡（体检 G4）。
+      const client = (
+        opts.wsClientFactory ?? ((o: Record<string, unknown>) => new WSClient(o as never))
+      )({
         botId: opts.botId,
         secret: opts.secret,
         ...(opts.wsUrl ? { wsUrl: opts.wsUrl } : {}),
+        maxReconnectAttempts: opts.maxReconnectAttempts ?? -1,
         logger: {
           debug: () => {},
           info: (m: string) => logger?.info?.(`[wecom-sdk] ${m}`),
           warn: (m: string, ...a: unknown[]) => logger?.warn?.(`[wecom-sdk] ${m} ${a.join(" ")}`),
           error: (m: string, ...a: unknown[]) => logger?.error?.(`[wecom-sdk] ${m} ${a.join(" ")}`),
         },
-      });
-      ws = client;
+      }) as {
+        on(ev: string, h: (...args: any[]) => void): unknown;
+        connect(): unknown;
+      };
+      ws = client as never;
 
       client.on("authenticated", () => {
         logger?.info?.("企微智能机器人连接已认证");
@@ -101,7 +114,14 @@ export function createWecomClient(opts: WecomClientOptions) {
         setConnState(false);
       });
       client.on("error", (err: Error) => {
-        logger?.error?.(`企微连接错误: ${err instanceof Error ? err.message : String(err)}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        // ★ G4：重连耗尽不再静默——显式 error 日志（无限重连下理论上不会出现，
+        //   但若 SDK 认证失败等不可重试错误仍可能 terminal，必须可观测）
+        if (/max reconnect|exhausted/i.test(msg)) {
+          logger?.error?.(`企微连接重连耗尽（maxReconnectAttempts=${opts.maxReconnectAttempts ?? -1}）: ${msg}——请在面板核对 wecomReady 并考虑 /wecom 或重启恢复`);
+        } else {
+          logger?.error?.(`企微连接错误: ${msg}`);
+        }
         setConnState(false);
       });
 

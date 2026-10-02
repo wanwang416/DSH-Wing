@@ -17,6 +17,10 @@ export interface WingStatus {
   connectedAt?: number;
   lastProbeAt?: number;
   lastProbeOk?: boolean;
+  /** ★ G4（批次 3）：企微线路连接状态（wecom 线未启用时为 undefined） */
+  wecomConnState?: "disconnected" | "connected";
+  /** ★ G4（批次 3）：企微 WS 是否就绪（面板可见，旧实现完全看不到企微死活） */
+  wecomReady?: boolean;
 }
 
 export function createStatusStore(file: string, now: () => number = Date.now) {

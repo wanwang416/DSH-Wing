@@ -8,7 +8,7 @@ import type { WingLarkClient } from "../host/client.js";
 
 export interface SenderDeps {
   getClient(): WingLarkClient | undefined;
-  logger?: { warn?: (m: string) => void; error?: (m: string) => void };
+  logger?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
   maxRetries?: number;
 }
 
@@ -55,7 +55,7 @@ export function createSender(deps: SenderDeps) {
     async sendText(chatId: string, text: string): Promise<unknown> {
       const c = client();
       if (!c?.sendMessage) throw new Error("lark 客户端未就绪");
-      return withRetry(() =>
+      const res = await withRetry(() =>
         c.sendMessage({
           receive_id_type: receiveIdType(chatId),
           params: {
@@ -65,12 +65,16 @@ export function createSender(deps: SenderDeps) {
           },
         }),
       );
+      // ★ L18（批次 3）：飞书出站补正向日志（对齐企微「企微出站：帧回复」风格；
+      //   含字节数可核对，旧实现成功时静默只能靠"无 warn"反推）
+      deps.logger?.info?.(`飞书出站：文本 ${Buffer.byteLength(text, "utf8")}B → ${chatId}`);
+      return res;
     },
     /** 发送卡片消息（M1 工具状态备用；M2 起 CardKit 渲染） */
     async sendCard(chatId: string, card: unknown): Promise<unknown> {
       const c = client();
       if (!c?.sendMessage) throw new Error("lark 客户端未就绪");
-      return withRetry(() =>
+      const res = await withRetry(() =>
         c.sendMessage({
           receive_id_type: receiveIdType(chatId),
           params: {
@@ -80,6 +84,9 @@ export function createSender(deps: SenderDeps) {
           },
         }),
       );
+      // ★ L18：同上，卡片含字节数
+      deps.logger?.info?.(`飞书出站：卡片 ${Buffer.byteLength(JSON.stringify(card), "utf8")}B → ${chatId}`);
+      return res;
     },
     /**
      * ★ M3 任务 2：CardKit 两步发送（createCardEntity → im.message.create 引用 card_id）。
