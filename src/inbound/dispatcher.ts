@@ -31,10 +31,22 @@ export function createDispatcher(deps: DispatcherDeps) {
         deps.logger?.warn?.(`去重丢弃消息 ${messageId}`);
         return;
       }
+
+      // ★ M22（2026-10-02 阶段4）：先解析、后占去重位——解析失败（非 text/未知类型/空文本）
+      //   不再永久占用去重位（旧实现先 add 后 parse，未知消息重投也永远进不来，且全程无日志）。
+      const msg = parseInboundMessage(raw, deps.botOpenId());
+      if (!msg) {
+        const msgType = raw?.message?.message_type ?? raw?.message_type ?? "unknown";
+        deps.logger?.warn?.(`消息无法解析（msgtype=${msgType}），跳过且不占去重位: ${messageId}`);
+        return;
+      }
       if (!deps.dedupe.add(messageId)) return;
 
-      const msg = parseInboundMessage(raw, deps.botOpenId());
-      if (!msg) return; // 非 text 或解析失败
+      // ★ M22-③：parser 标记的 chat_type 未知（缺失/非法）→ warn（不默认 p2p，防绕过群策略）
+      if ((raw as any)?.__chatTypeUnknown) {
+        deps.logger?.warn?.(`消息 chat_type 缺失或非法，按未知处理（群策略宽松分支）: ${messageId}`);
+        delete (raw as any).__chatTypeUnknown;
+      }
 
       try {
         await deps.handleInbound(msg);

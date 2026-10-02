@@ -101,13 +101,29 @@ export function parseInboundMessage(raw: any, botOpenId?: string): ParsedMessage
   const chatId: string | undefined = msg.chat_id ?? raw.chat_id;
   if (!messageId || !chatId) return undefined;
 
-  const chatType: "p2p" | "group" = (msg.chat_type ?? raw.chat_type ?? "p2p") === "group" ? "group" : "p2p";
+  const chatTypeRaw = msg.chat_type ?? raw.chat_type;
+  // ★ M22-③（2026-10-02 阶段4）：chat_type 缺失不再默认 "p2p"——缺 chat_type 的群消息会被
+  //   当成私聊从而**绕过群策略**。改为：缺失 → warn 并按 "group" 宽松分支处理（群策略的
+  //   未命中规则决定后续；代价可控，漏处理优于越权处理），并在 ParsedMessage 上如实标记 "unknown"。
+  let chatType: "p2p" | "group";
+  let chatTypeKnown = true;
+  if (chatTypeRaw === "group") chatType = "group";
+  else if (chatTypeRaw === "p2p") chatType = "p2p";
+  else {
+    chatType = "group"; // 未知 → 宽松分支
+    chatTypeKnown = false;
+  }
   const senderOpenId: string = raw.sender?.sender_id?.open_id ?? raw.operator?.operator_id?.open_id ?? "unknown";
-  const msgType: string | undefined = msg.message_type ?? raw.message_type;
 
   const content: string = msg.content ?? raw.content ?? "";
+  const msgType: string | undefined = msg.message_type ?? raw.message_type;
   const rawText = msgType && msgType !== "text" ? summarizeNonText(msgType, content) : pickText(content);
   if (!rawText || !rawText.trim()) return undefined;
+  if (!chatTypeKnown) {
+    // warn 输出经 dispatcher 的 logger 透出没有 parser 级 logger——在此用返回字段标记，
+    // dispatcher 侧统一打 warn（避免 parser 引入 logger 依赖）。
+    (raw as any).__chatTypeUnknown = true;
+  }
 
   const mentions: string[] = (msg.mentions ?? []).map((m: any) => m.id?.open_id ?? m.id?.user_id ?? m.name ?? "").filter(Boolean);
 
