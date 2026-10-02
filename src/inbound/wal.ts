@@ -5,7 +5,7 @@
  * 启动时 pendingReplays() 重放未完成消息（崩溃补发，最多 2 次）。
  */
 
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 export interface InboundWalRecord {
@@ -24,6 +24,7 @@ export interface InboundWalDeps {
   replayRetentionMs?: number;
   maxReplayAttempts?: number;
   now?: () => number;
+  logger?: { info?: (m: string) => void; warn?: (m: string) => void };
 }
 
 export function createInboundWal(deps: InboundWalDeps) {
@@ -64,11 +65,44 @@ export function createInboundWal(deps: InboundWalDeps) {
       const segFile = join(dir, `seg-${Date.now()}.jsonl`);
       const tmp = `${segFile}.tmp`;
       const lines = [...records.values()].map((r) => JSON.stringify(r));
-      writeFileSync(tmp, lines.join("\n") + "\n", { mode: 0o600 });
+      // ★ M1（2026-10-02 阶段4）：WAL 段语义与 outbox 不同——每段本就是**全量快照**（persistAll
+      //   每次写全部记录），不是 outbox 那种追加日志。因此旧段无需超期判定：新段写出成功后，
+      //   所有旧段都已被新段完全取代，全部删除即可（模式对齐 outbox M48 的"先写成功、后删旧段"）。
+      //   写新段失败 → 不删任何旧段（宁可占空间，也不丢状态）。
+      writeFileSync(tmp, lines.length > 0 ? lines.join("\n") + "\n" : "", { mode: 0o600 });
       renameSync(tmp, segFile);
+      // 回收旧段（保留刚写出的最新 1 段）
+      const newest = segFile.split(/[\\/]/).pop()!;
+      let removed = 0;
+      let failed = 0;
+      try {
+        for (const f of readdirSync(dir)) {
+          if (!/^seg-.*\.jsonl$/.test(f) || f === newest) continue;
+          try {
+            rmSync(join(dir, f));
+            removed += 1;
+          } catch (err) {
+            failed += 1;
+            deps.logger?.warn?.(`WAL 段回收失败（${f}）: ${describeWalError(err)}`);
+          }
+        }
+      } catch (err) {
+        failed += 1;
+        deps.logger?.warn?.(`WAL 段回收（列目录失败）: ${describeWalError(err)}`);
+      }
+      if (removed > 0 || failed > 0) {
+        deps.logger?.info?.(`WAL 段回收：删除 ${removed} 个旧段（保留最新 1 个）${failed > 0 ? `，失败 ${failed} 个` : ""}`);
+      }
     } catch {
-      // 忽略
+      // 写新段失败：不动任何旧段（宁可不回收，也不丢状态）——不抛出，WAL 写失败不阻断消息处理
     }
+  }
+
+  /** WAL 模块内错误可读化（不引 outbox 依赖，保持 inbound 模块独立） */
+  function describeWalError(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    if (typeof err === "string") return err;
+    try { return JSON.stringify(err) ?? "unknown"; } catch { return "unknown"; }
   }
 
   load();
@@ -108,14 +142,32 @@ export function createInboundWal(deps: InboundWalDeps) {
     },
     prune(): void {
       const cutoff = now() - replayRetentionMs;
-      let changed = false;
+      let changed = 0;
+      const breakdown = { delivered: 0, overAttempts: 0, expired: 0 };
       for (const [id, r] of records) {
-        if (r.acceptedAt < cutoff && (r.state === "delivered" || r.attempts >= maxReplayAttempts)) {
+        if (r.acceptedAt >= cutoff) continue; // 保留期内不动
+        // ★ M20（2026-10-02 阶段4）：超保留期一律清理（delivered / 超次 / 过期未投递都算）。
+        //   旧实现只清 delivered+超次，"accepted 且 attempts<2"的过期记录两边都不沾 → 永久滞留。
+        if (r.state === "delivered") {
           records.delete(id);
-          changed = true;
+          changed += 1;
+          breakdown.delivered += 1;
+        } else if (r.attempts >= maxReplayAttempts) {
+          records.delete(id);
+          changed += 1;
+          breakdown.overAttempts += 1;
+        } else {
+          records.delete(id);
+          changed += 1;
+          breakdown.expired += 1;
         }
       }
-      if (changed) persistAll();
+      if (changed > 0) {
+        persistAll();
+        deps.logger?.info?.(
+          `WAL prune：清理 ${changed} 条超期记录（delivered ${breakdown.delivered} / 超次 ${breakdown.overAttempts} / 过期未投递 ${breakdown.expired}），保留期内 ${records.size} 条`,
+        );
+      }
     },
     remove(messageId: string): void {
       if (records.delete(messageId)) persistAll();
