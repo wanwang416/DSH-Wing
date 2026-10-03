@@ -25,3 +25,6 @@ coverage/
 # local credentials & deployment config (never commit)
 .credentials.yaml
 cordis.patch.yml
+
+# local dist backups (build 前备份目录，不进版本库)
+dist.bak-*/

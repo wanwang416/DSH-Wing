@@ -10,7 +10,8 @@
  */
 
 import { mkdirSync, writeFileSync, existsSync, statSync } from "node:fs";
-import { appendRotatingLine } from "./log/rotation.js";
+import { appendRotatingLine, setRotationNotifier } from "./log/rotation.js";
+import { sweepArchiveStartup } from "./log/archive-retention.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
@@ -104,6 +105,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
     warn: (m: string) => { ctx.logger?.warn?.(`[dsh-wing] ${m}`); fileLog("warn", m); },
     error: (m: string) => { ctx.logger?.error?.(`[dsh-wing] ${m}`); fileLog("error", m); },
   };
+  // ★ M24（阶段7a）：轮转失败不静默——接线 notifier（模块级回调，避免 rotation→index 循环依赖）
+  setRotationNotifier({ warn: (m) => logger.warn(m) });
 
   // M0 遗留：加载 marker（证明插件被 DSH 加载；非 DSH 环境忽略）
   try {
@@ -1073,8 +1076,23 @@ export function apply(ctx: any, rawConfig: unknown): void {
       clear: (chatId) => modelRegistry.clearOverride(chatId),
     },
     // P1-3 第二批命令服务（/resume /workspace /steer）
+    // ★ G14（阶段7a）：/resume 查路由按会话平台选前缀（照 questionPlatformOf 同构：登记优先，
+    //   isWecomChatId 启发式兜底）；登记表为空（重启后）→ 双前缀兜底，两个 key 都存在（理论可能）
+    //   时取 updatedAt 较新者（规则由 stage7a-hygiene 测试钉死，防将来静默选错）。
+    //   旧实现 sessionKey(chatId) 恒用 feishu: → 企微会话永远报"没有可恢复的历史会话"。
     resumeSession: async (chatId) => {
-      const route = routeStore.get(sessionKey(chatId));
+      const resolveResumeKey = (): string => {
+        const platform = chatPlatform(chatId) ?? (isWecomChatId(chatId) ? "wecom" : undefined);
+        const primary = sessionKey(chatId, platform === "wecom" ? WECOM_SESSION_PREFIX : SESSION_PREFIX);
+        const other = sessionKey(chatId, platform === "wecom" ? SESSION_PREFIX : WECOM_SESSION_PREFIX);
+        const pRoute = routeStore.get(primary);
+        const oRoute = routeStore.get(other);
+        if (pRoute && oRoute) {
+          return (oRoute.updatedAt ?? 0) > (pRoute.updatedAt ?? 0) ? other : primary;
+        }
+        return oRoute && !pRoute ? other : primary;
+      };
+      const route = routeStore.get(resolveResumeKey());
       if (!route?.sessionId) return { resumed: false };
       const handle = await mapper?.getOrCreateAgent(chatId); // 有 route → 自动 resume；已在内存 → 直接复用
       return { resumed: true, sessionId: handle?.sessionId ?? route.sessionId };
@@ -1283,6 +1301,9 @@ export function apply(ctx: any, rawConfig: unknown): void {
       lifecycleStarted = true;
       startBlocker = undefined;
       logger.info?.("bridge started (M2 + P1-2 model sync)");
+      // ★ M25（阶段7a）：archive 归档目录保留策略——启动时后台一次性回收（不阻塞启动：
+      //   void 不 await；内部 setTimeout(0) + unref 不拖住进程退出；单次上限 50 个文件）
+      void sweepArchiveStartup(join(dir, "archive"), { logger });
     } catch (err) {
       startBlocker = describeError(err);
       logger.error?.(`bridge 启动失败: ${startBlocker}`);

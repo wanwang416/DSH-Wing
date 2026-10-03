@@ -13,6 +13,32 @@
  */
 import { appendFileSync, existsSync, renameSync, rmSync, statSync } from "node:fs";
 
+/**
+ * ★ M24（阶段7a）：轮转/写入失败不再静默——经 notifier 上报（warn + 步骤名 + 原文件大小）。
+ * 模块级可设置回调（同 M27 stateDir 迁移思路：避免 rotation → index 循环依赖）；
+ * index.ts apply 时 setRotationNotifier({ warn: logger.warn }) 接线。
+ */
+type RotationNotifier = { warn?: (msg: string) => void };
+let rotationNotifier: RotationNotifier | undefined;
+
+/** apply 时接线（不设则失败仍不上报——但空 catch 已绝迹，counters 仍累计可核对） */
+export function setRotationNotifier(n: RotationNotifier | undefined): void {
+  rotationNotifier = n;
+}
+
+/** 失败上报统一出口：warn（哪一步失败、原文件多大）+ 计数 */
+let rotationFailures = 0;
+export function rotationFailureCount(): number {
+  return rotationFailures;
+}
+function notifyRotationFailure(file: string, step: string, err: unknown, originalSize?: number): void {
+  rotationFailures++;
+  const sizeInfo = originalSize !== undefined ? `，原文件 ${(originalSize / 1024 / 1024).toFixed(1)} MB` : "";
+  rotationNotifier?.warn?.(
+    `日志轮转失败（步骤=${step}${sizeInfo}）: ${file}: ${err instanceof Error ? err.message : String(err)}`,
+  );
+}
+
 /** 单文件上限（字节），默认 16 MiB。 */
 export const LOG_MAX_BYTES: number = (() => {
   const raw = Number(process.env.DSH_WING_LOG_MAX_BYTES ?? "");
@@ -42,29 +68,32 @@ export function rotateIfNeeded(file: string): void {
   try {
     size = statSync(file).size;
   } catch {
-    return; // 文件尚不存在，无需轮转
+    return; // 文件尚不存在，无需轮转（这不是失败，不上报）
   }
   if (size < LOG_MAX_BYTES) return;
 
   const oldest = `${file}.${LOG_KEEP}`;
   try {
     if (existsSync(oldest)) rmSync(oldest, { force: true });
-  } catch {
-    // 忽略
+  } catch (err) {
+    // ★ M24：不再静默
+    notifyRotationFailure(file, `删除最旧归档 ${oldest}`, err, size);
   }
   for (let i = LOG_KEEP - 1; i >= 1; i--) {
     const from = `${file}.${i}`;
     if (!existsSync(from)) continue;
     try {
       renameSync(from, `${file}.${i + 1}`);
-    } catch {
-      // 忽略
+    } catch (err) {
+      // ★ M24：不再静默
+      notifyRotationFailure(file, `后移归档 ${from}→${file}.${i + 1}`, err, size);
     }
   }
   try {
     renameSync(file, `${file}.1`);
-  } catch {
-    // 忽略
+  } catch (err) {
+    // ★ M24：不再静默
+    notifyRotationFailure(file, `主文件轮转 ${file}→${file}.1`, err, size);
   }
 }
 
@@ -72,8 +101,9 @@ function writeRotating(file: string, line: string): void {
   try {
     rotateIfNeeded(file);
     appendFileSync(file, line);
-  } catch {
-    // 忽略写文件失败
+  } catch (err) {
+    // ★ M24：写文件失败也上报（不再静默；但不抛出——日志写入永远不影响主流程）
+    notifyRotationFailure(file, "追加写入", err);
   }
 }
 
