@@ -329,6 +329,10 @@ export function createExperience(deps: ExperienceDeps) {
             return "queued";
           }
           // 纯确认词（嗯/好的/收到/明白/知道了）→ 仅回执（onInbound reaction 已打），不注入不打断
+          // ★ M18（阶段6c-2）：拦截但留痕——旧实现只有可选文件 diagLog，logger 零痕迹，
+          //   用户以为机器人没收到（静默丢弃）。取舍：不注入（纯确认词无信息量，
+          //   注入只会稀释上下文），但必须 info 留痕可核对（施工单二选一的第 2 项）。
+          deps.logger?.info?.(`纯确认词留痕 chat=${chatId} text="${text.slice(0, 30)}" → 仅回执不注入（不打断主任务）`);
           diagLog(`[steer-diag] V4 ORDINARY(纯确认) 分支(仅回执): text="${text.slice(0, 30)}" status=${agent.status}`);
           return "queued";
         }

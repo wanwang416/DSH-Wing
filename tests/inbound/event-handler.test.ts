@@ -142,31 +142,56 @@ describe("createEventHandler（M4 提取重构）", () => {
     expect(deps.mapper.get).not.toHaveBeenCalled();
   });
 
-  it("recalled：有进行中 agent → cancel({kind: recalled})", () => {
-    const { deps, agent } = makeDeps();
+  it("recalled：有进行中 agent + 本人撤回 → cancel({kind: user})", () => {
+    const { deps, agent } = makeDeps({
+      // ★ M21 统一 fail-closed：撤回要生效必须 operator = 发起者（测试注入发起者表）
+      turnInitiatorOwner: () => "ou_alan",
+    });
     deps.mapper.get.mockReturnValue(agent);
     const onEvent = createEventHandler(deps as any);
-    onEvent("im.message.recalled_v1", { message: { chat_id: "oc_1", message_id: "om_1" } });
+    // ★ M38（阶段6c-2）：cause 由 {kind:"recalled"} 改为 {kind:"user"}——SDK 合法集
+    //   AgentCancelCause = 'user'|'parent'|'hook'{reason}|'disposed'（dsh-session types.d.ts L118-128），
+    //   "recalled" 不在集合内（TS 未报错因 handle 类型宽松），下游可能把它当正常结束。
+    onEvent("im.message.recalled_v1", {
+      message: { chat_id: "oc_1", message_id: "om_1" },
+      operator: { operator_id: { open_id: "ou_alan" } },
+    });
     expect(deps.mapper.get).toHaveBeenCalledWith("oc_1");
-    expect(agent.cancel).toHaveBeenCalledWith({ kind: "recalled" });
+    expect(agent.cancel).toHaveBeenCalledWith({ kind: "user" });
     expect(deps.logger.info).toHaveBeenCalledWith(expect.stringContaining("已停止 agent 生成"));
   });
 
-  it("recalled：chat_id 顶层字段 + 无 agent → info 跳过", () => {
-    const { deps } = makeDeps();
+  it("recalled：归属校验拒绝（无 operator / 非发起者）→ warn，不 cancel（M21 fail-closed）", () => {
+    const { deps, agent } = makeDeps({ turnInitiatorOwner: () => "ou_alan" });
+    deps.mapper.get.mockReturnValue(agent);
+    const onEvent = createEventHandler(deps as any);
+    onEvent("im.message.recalled_v1", { message: { chat_id: "oc_1", message_id: "om_9" } });
+    expect(agent.cancel).not.toHaveBeenCalled();
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("归属校验"));
+  });
+
+  it("recalled：chat_id 顶层字段 + 无发起者记录 + 本人 operator → 无 agent info 跳过", () => {
+    const { deps } = makeDeps({ turnInitiatorOwner: () => "ou_alan" });
     deps.mapper.get.mockReturnValue(undefined);
     const onEvent = createEventHandler(deps as any);
-    onEvent("im.message.recalled_v1", { chat_id: "oc_1", message_id: "om_2" });
+    onEvent("im.message.recalled_v1", {
+      chat_id: "oc_1",
+      message_id: "om_2",
+      operator: { operator_id: { open_id: "ou_alan" } },
+    });
     expect(deps.logger.info).toHaveBeenCalledWith(expect.stringContaining("无进行中 agent，跳过"));
     expect(deps.mapper.get).toHaveBeenCalledWith("oc_1");
   });
 
   it("recalled：cancel 抛错 → warn 停止失败", () => {
-    const { deps } = makeDeps();
+    const { deps } = makeDeps({ turnInitiatorOwner: () => "ou_alan" });
     const agent = { cancel: vi.fn(() => { throw new Error("cancel boom"); }) };
     deps.mapper.get.mockReturnValue(agent);
     const onEvent = createEventHandler(deps as any);
-    onEvent("im.message.recalled_v1", { message: { chat_id: "oc_1", message_id: "om_3" } });
+    onEvent("im.message.recalled_v1", {
+      message: { chat_id: "oc_1", message_id: "om_3" },
+      operator: { operator_id: { open_id: "ou_alan" } },
+    });
     expect(deps.logger.warn).toHaveBeenCalledWith(expect.stringContaining("停止 agent 失败"));
   });
 

@@ -490,14 +490,8 @@ export function apply(ctx: any, rawConfig: unknown): void {
     }
 
     // 收尾（对齐 handleInbound queued 分支的 WAL + 路由账目）
-    inboundWal.accept({
-      messageId: msg.messageId,
-      chatId: msg.chatId,
-      chatType: msg.chatType,
-      text: msg.text,
-      senderOpenId: msg.userId,
-    });
-    status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
+    // ★ M23：accept 已提前到 handleInbound 的 handleUserMessage 之前（处理前落盘）；
+    //   命令消息同样先 accept 再执行 runCommand，此处不再重复 accept
     experience.onInbound(msg.chatId, msg.messageId);
     const key = sessionKey(msg.chatId, platformPrefix);
     const route = routeStore.get(key);
@@ -688,6 +682,22 @@ export function apply(ctx: any, rawConfig: unknown): void {
         await runCommand(routed, msg);
         return;
       }
+      // ★ M23（阶段6c-2）：WAL「处理前落盘」承诺兑现——accept 必须先于任何 turn 启动。
+      //   旧时序：queued 分支的 accept 在 serialQueue.enqueue 回调里，而 handleUserMessage（内含
+      //   agent.followup = turn 已启动）在 enqueue 之前同步执行 → accept 晚于 turn 启动，
+      //   崩溃窗口内 WAL 无记录（承诺为零）。新时序：到达「将注入 agent」的判定点前先 accept，
+      //   delivered 仍在各分支处理成功之后。崩溃窗口断言见 tests/inbound/stage6c2.test.ts。
+      //   注意：steered/stopped、命令、提问/审批消费等分支原本就有 accept+delivered，为防重复
+      //   accept，此处 accept 后各分支改为只 delivered（wal.delivered 对不存在记录是 no-op，
+      //   顺序安全）；各分支原 accept 调用点移除。
+      inboundWal.accept({
+        messageId: msg.messageId,
+        chatId: msg.chatId,
+        chatType: msg.chatType,
+        text: msg.text,
+        senderOpenId: msg.userId,
+      });
+      status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
       // 2) 立即调用 handleUserMessage → steer/stop 立即生效（和 DSH GUI 完全一致）
       //    （routed.kind === "inject"：普通消息 / 未知命令 → 原样注入 Agent，不吞命令）
       const action = experience.handleUserMessage(msg.chatId, agent, msg.text, message);
@@ -696,14 +706,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
       // 3) 分支处理（按 DSH 原生决策）：
       // a) steered/stopped → 立即做完 WAL 和路由，不排队，直接返回 → 打断立即生效
       if (action === "steered" || action === "stopped") {
-        inboundWal.accept({
-          messageId: msg.messageId,
-          chatId: msg.chatId,
-          chatType: msg.chatType,
-          text: msg.text,
-          senderOpenId: msg.userId,
-        });
-        status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
+        // ★ M23：accept 已提前（处理前落盘），此处只做路由账目 + delivered
         experience.onInbound(msg.chatId, msg.messageId);
         const key = sessionKey(msg.chatId, platformPrefix);
         const route = routeStore.get(key);
@@ -727,20 +730,18 @@ export function apply(ctx: any, rawConfig: unknown): void {
       }
 
       // b) queued → 只有新建轮次才进串行队列，保证单 chat 一次只跑一个轮次（和 DSH 原生一致）
-      await serialQueue.enqueue(msg.chatId, async () => {
+      // ★ M28 收尾（阶段6c-2）：生产调用点启用超时——与轮次超时同源取 cfg.turnTimeoutMs。
+      //   依据：轮次本身有超时（turn-supervisor 600s 默认），出站单条任务不应比整个轮次活得久；
+      //   超时行为（serial.ts withTimeout）：reject + onTimeout warn + 释放队列让后续任务继续，不静默。
+      await serialQueue.enqueue(
+        msg.chatId,
+        async () => {
         // ★ G6-B（阶段5b-2）：turn 开始时快照发起者身份（chatId → senderOpenId）——
         //   群聊 Always 记忆只对当初点它的那个人生效。快照点在 queued（真正开 turn）处：
         //   steered/插话不覆盖快照（A 触发 turn、B 插话排队时不会被误判成 B）。
         //   turn 结束在 forwarder.onTurnEnd 里清除（防止跨 turn 误用旧身份）。
         turnInitiator.set(msg.chatId, msg.userId);
-        inboundWal.accept({
-          messageId: msg.messageId,
-          chatId: msg.chatId,
-          chatType: msg.chatType,
-          text: msg.text,
-          senderOpenId: msg.userId,
-        });
-        status.refreshCounters({ inboundPending: inboundWal.pendingCount() });
+        // ★ M23：accept 已提前到 handleUserMessage 之前（处理前落盘），此处不再重复 accept
         experience.onInbound(msg.chatId, msg.messageId);
         const key = sessionKey(msg.chatId, platformPrefix);
         const route = routeStore.get(key);
@@ -760,7 +761,16 @@ export function apply(ctx: any, rawConfig: unknown): void {
           inboundPending: inboundWal.pendingCount(),
           sessions: mapper?.size() ?? 0,
         });
-      });
+        },
+        {
+          // ★ M28 收尾：超时 = 轮次超时同源（turnTimeoutMs）；超时后 warn + 计数 + 队列继续
+          timeoutMs: cfg.turnTimeoutMs,
+          onTimeout: (m: string) => {
+            logger.warn?.(m);
+            status.refreshCounters({});
+          },
+        },
+      );
     },
   });
 
@@ -830,7 +840,18 @@ export function apply(ctx: any, rawConfig: unknown): void {
       await dispatcher.handleEvent("im.message.receive_v1", data);
     },
     // M4 任务 6 提取重构：5 类事件处理独立模块（bot_added/p2p_entered/card.action/recalled/default）
-    onEvent: createEventHandler({ outbox, logger, mapper, userQuestionBridge, experience, interactiveRouter, approvalBridge }),
+    onEvent: createEventHandler({
+      outbox,
+      logger,
+      mapper,
+      userQuestionBridge,
+      experience,
+      interactiveRouter,
+      approvalBridge,
+      // ★ M21（阶段6c-2）：撤回归属校验——与 5b-2 initiatorOf 同一张 turnInitiator Map 同源注入，
+      //   不新建第二张（防"两处口径"）。生产接线证据：tests/inbound/stage6c2.test.ts 源码级断言。
+      turnInitiatorOwner: (chatId: string) => turnInitiator.get(chatId),
+    }),
     lockDir: join(dir, "locks"),
     logger,
   });

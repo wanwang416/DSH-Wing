@@ -29,6 +29,9 @@ export interface EventHandlerDeps {
   interactiveRouter?: InteractiveRouter;
   /** P1-1 审批卡回调（approval:<entryId>:<decision> 前缀；需带点击者 open_id 做老板限定） */
   approvalBridge?: ApprovalBridge;
+  /** ★ M21（阶段6c-2）撤回归属校验：查询 chatId 的当前 turn 发起者（index.ts 的 turnInitiator Map 同源注入）；
+   *  返回 undefined = 该会话无进行中的 turn 发起者记录。 */
+  turnInitiatorOwner?: (chatId: string) => string | undefined;
 }
 
 export function createEventHandler(deps: EventHandlerDeps) {
@@ -160,18 +163,38 @@ export function createEventHandler(deps: EventHandlerDeps) {
       }
       case "im.message.recalled_v1": {
         // ★ M4 任务 6：消息撤回 → 停止该 chat 正在生成的 agent（非阻塞；无 agent 则跳过）
-        // chatIdOf() 覆盖 chat_id / chat.chat_id / operator.open_id；recalled 事件字段在 message.chat_id
-        const chatId = chatIdOf() ?? (d as any)?.message?.chat_id;
+        // chatId 取值：顶层 chat_id / chat.chat_id / message.chat_id（recalled 事件字段在 message.chat_id，
+        // 旧实现的 chatIdOf() 还兜底 operator.open_id——M21 后 operator 只做归属校验不再当 chatId，
+        // 防止"拿操作者 open_id 当会话 id"的误判）
+        const chatId = (d?.chat_id ?? d?.chat?.chat_id ?? d?.message?.chat_id) as string | undefined;
+        const operatorId = d?.operator?.operator_id?.open_id as string | undefined;
         const msgId = d?.message?.message_id ?? d?.message_id ?? "?";
         if (!chatId) {
           logger?.warn?.(`im.message.recalled_v1 取不到 chatId，跳过`);
           break;
         }
+        // ★ M21（阶段6c-2）归属校验 fail-closed（阿深中期验收统一口径）：撤回必须来自本会话当前
+        //   turn 的发起者，且事件必须带 operator——**判定不了归属 = 拒绝**（两条分支原互相矛盾：
+        //   "无 operator → 拒" vs "无发起者记录 → 放行"，已统一为都拒）。
+        //   代价权衡：撤回不是关键功能，误拒代价 = "撤回不生效"（可控）；
+        //   误放行代价 = "取消别人的会话"（不可控）→ 默认 fail-closed。
+        //   重启后 Map 为空 → 撤回不生效：可接受（agent 通常也已随重启销毁，无生成可停）。
+        const owner = deps.turnInitiatorOwner?.(chatId);
+        if (owner === undefined || operatorId === undefined || operatorId !== owner) {
+          logger?.warn?.(
+            `消息撤回归属校验拒绝 msg=${msgId} chat=${chatId} operator=${operatorId ?? "（事件未带 operator）"} 发起者=${owner ?? "（无进行中 turn 记录）"} → 不停止 agent（fail-closed）`,
+          );
+          break;
+        }
         const handle = mapper?.get(chatId);
         if (handle) {
           try {
-            handle.cancel({ kind: "recalled" });
-            logger?.info?.(`消息撤回 msg=${msgId} chat=${chatId} → 已停止 agent 生成`);
+            // ★ M38（阶段6c-2）：cancel cause 必须用 SDK 合法集
+            //   AgentCancelCause = 'user' | 'parent' | 'hook'{reason} | 'disposed'（dsh-session types.d.ts L118-128）。
+            //   旧值 {kind:"recalled"} 不在集合内（TS 未报错因 handle 类型宽松）→ 下游可能当正常结束。
+            //   撤回 = 用户主动取消 → 合法值 {kind:"user"}（与 stop 命令、turn 超时同族）。
+            handle.cancel({ kind: "user" });
+            logger?.info?.(`消息撤回 msg=${msgId} chat=${chatId} → 已停止 agent 生成（cause=user）`);
           } catch (err) {
             logger?.warn?.(`消息撤回停止 agent 失败 chat=${chatId}: ${err instanceof Error ? err.message : String(err)}`);
           }
