@@ -64,8 +64,8 @@ describe("batching 合批", () => {
     const onFlush = vi.fn();
     const batching = createBatching({ cfg: { windowMs: 50, maxCount: 8, maxChars: 4000 }, onFlush });
     // oc_ 前缀 chatId 但事件真值是 p2p（P2P 会话实证）→ 透传 p2p
-    batching.add("oc_FAKE_CHAT_FOR_TEST5febf004d34aa554d341b3d8a", { messageId: "m1", text: "你好", chatType: "p2p" });
-    batching.add("oc_FAKE_CHAT_FOR_TEST5febf004d34aa554d341b3d8a", { messageId: "m2", text: "在吗", chatType: "p2p" });
+    batching.add("oc_FAKE_CHAT_FOR_TEST", { messageId: "m1", text: "你好", chatType: "p2p" });
+    batching.add("oc_FAKE_CHAT_FOR_TEST", { messageId: "m2", text: "在吗", chatType: "p2p" });
     await sleep(100);
     const items = onFlush.mock.calls[0][1] as Array<{ chatType?: string }>;
     expect(items).toHaveLength(2);

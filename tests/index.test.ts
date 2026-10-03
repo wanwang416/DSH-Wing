@@ -536,7 +536,7 @@ describe("index.ts apply 集成（M4 覆盖重构）", () => {
     await startBridge(ctx);
     await vi.waitFor(() => expect(ctx.logger.info).toHaveBeenCalledWith(expect.stringContaining("bridge started")));
     // ALAN P2P 会话实证：chatId=oc_1310… 但事件 chat_type=p2p
-    await h.transportOpts.onMessage(p2pMsg("om_p2p1", "你好", "oc_FAKE_CHAT_FOR_TEST5febf004d34aa554d341b3d8a"));
+    await h.transportOpts.onMessage(p2pMsg("om_p2p1", "你好", "oc_FAKE_CHAT_FOR_TEST"));
     await vi.waitFor(() => expect(h.wal.accept).toHaveBeenCalled());
     const accepted = h.wal.accept.mock.calls.at(-1)![0];
     expect(accepted.chatType).toBe("p2p");
