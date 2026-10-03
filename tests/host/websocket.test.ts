@@ -27,6 +27,13 @@ function makeClient(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
+/** ★6a G9 夹具：一个"确定不属于本进程"的外来 PID（跨进程持有者）。
+ *  ★ 阿深修正（2026-10-03 验收）：原实现用 tasklist 动态挑一个真实存活进程当夹具，有两个问题——
+ *    ① 全量并发运行时那个进程可能在断言前退出 → 被判定"已死"→ 走接管路径 → 断言失败
+ *       （实测：全量红、单跑绿，且整个文件被拖到 17s）；② 依赖真实系统状态本身就不可控。
+ *    现改为固定 PID + 在本用例内 mock process.kill（"存活"语义完全可控，且快）。 */
+const FOREIGN_ALIVE_PID = 999_999;
+
 function makeDeps(client: any, dir: string, overrides: Record<string, unknown> = {}) {
   return {
     getClient: () => client,
@@ -43,8 +50,9 @@ describe("acquireSingleInstanceLock", () => {
     const dir = tmpDir();
     const lock = acquireSingleInstanceLock(join(dir, "lock"));
     expect(lock).toBeTruthy();
-    // 占用：再次获取返回 undefined
-    expect(acquireSingleInstanceLock(join(dir, "lock"))).toBeUndefined();
+    // ★6a G9：同进程（测试进程自己）持锁 → 新实现可接管（旧实现拒绝）。
+    //   行为变更是本批目的本身（旧用例名"占用：再次获取返回 undefined"已过时）。
+    expect(acquireSingleInstanceLock(join(dir, "lock"))).toBeTruthy();
     lock!.release();
     // 释放后重新可用
     expect(acquireSingleInstanceLock(join(dir, "lock"))).toBeTruthy();
@@ -108,17 +116,27 @@ describe("createTransport.start 连接流程", () => {
 
   it("单实例锁被占用 → warn 并跳过连接", async () => {
     const dir = tmpDir();
-    // 先占用锁
-    const lock = acquireSingleInstanceLock(join(dir, "lock"));
-    const client = makeClient();
-    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const t = createTransport(makeDeps(client, dir, { logger }));
-    await t.start();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("锁被占用"));
-    expect(client.ws.start).not.toHaveBeenCalled();
-    expect(t.isConnected()).toBe(false);
-    lock!.release();
-    rmSync(dir, { recursive: true, force: true });
+    // 先占用锁（用"其他存活进程"造跨进程活跃持有者——★6a G9：直接 acquire 会写本进程 pid，
+    //   新实现会同进程接管，所以必须外置 PID 文件。锁结构 = lockDir/ws.lock/pid，两级，与实现一致）
+    // ★ 阿深修正（2026-10-03 验收）：改为 mock process.kill 掌控"存活"语义（原因见 FOREIGN_ALIVE_PID）
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
+      if (pid === FOREIGN_ALIVE_PID) return true; // 该 PID 视为存活 → 跨进程占用 → 应拒绝并 warn
+      throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    }) as typeof process.kill);
+    try {
+      mkdirSync(join(dir, "lock", "ws.lock"), { recursive: true });
+      writeFileSync(join(dir, "lock", "ws.lock", "pid"), String(FOREIGN_ALIVE_PID), "utf8");
+      const client = makeClient();
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const t = createTransport(makeDeps(client, dir, { logger }));
+      await t.start();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("锁被占用"));
+      expect(client.ws.start).not.toHaveBeenCalled();
+      expect(t.isConnected()).toBe(false);
+    } finally {
+      killSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("bot 信息获取失败不阻塞启动", async () => {

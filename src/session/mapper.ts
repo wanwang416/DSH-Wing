@@ -106,6 +106,8 @@ export function createSessionMapper<THandle extends AgentHandleLike>(opts: {
 }) {
   const agents = new Map<string, THandle>();
   const idleAt = new Map<string, number>();
+  // ★ G12（阶段6a）：in-flight 创建占位（chatId → 创建中 promise），完成后/失败即清
+  const creating = new Map<string, Promise<THandle>>();
 
   return {
     get(chatId: string): THandle | undefined {
@@ -117,10 +119,22 @@ export function createSessionMapper<THandle extends AgentHandleLike>(opts: {
         idleAt.set(chatId, Date.now());
         return existing;
       }
-      const handle = await opts.createAgent(chatId);
-      agents.set(chatId, handle);
-      idleAt.set(chatId, Date.now());
-      return handle;
+      // ★ G12（阶段6a）：in-flight 占位——第一个调用先建 promise，后到的等同一个。
+      //   旧实现 await 期间无占位 → 并发调用各建一个 agent（同会话上下文分裂/串话）。
+      const inflight = creating.get(chatId);
+      if (inflight) return inflight;
+      const p = (async () => {
+        try {
+          const handle = await opts.createAgent(chatId);
+          agents.set(chatId, handle);
+          idleAt.set(chatId, Date.now());
+          return handle;
+        } finally {
+          creating.delete(chatId); // 成功/失败都清占位——失败不清 = 该会话永久拿不到 agent
+        }
+      })();
+      creating.set(chatId, p);
+      return p;
     },
     /** 空闲超过 ttlMs 的 agent 逐个 dispose（sweep 用） */
     async 空闲清理(ttlMs: number): Promise<number> {

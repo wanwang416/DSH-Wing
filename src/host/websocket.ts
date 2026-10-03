@@ -109,7 +109,15 @@ export function acquireSingleInstanceLock(lockDir: string): { release(): void } 
     try {
       if (existsSync(pidFile)) {
         const pid = Number(readFileSync(pidFile, "utf8"));
-        if (isPidAlive(pid)) return undefined; // 活跃持有者
+        if (pid === process.pid) {
+          // ★ G9（阶段6a）：同进程残留锁（stop 异常未释放 / 热重载后再次 start）→
+          //   视为可接管——锁的本意是防"跨进程双 WS"，不是防自己。
+          //   旧实现 return undefined → 桥静默不启动（机器人不回消息，日志只有一行）。
+          console.warn(`[dsh-wing] 检测到本进程（pid=${pid}）残留锁，已接管（旧锁未正常释放）`);
+          rmSync(lockPath, { recursive: true, force: true });
+          return makeLock();
+        }
+        if (isPidAlive(pid)) return undefined; // 跨进程活跃持有者 → 拒绝（锁的保护不削弱）
         // 持有者已死：接管
         rmSync(lockPath, { recursive: true, force: true });
         return makeLock();

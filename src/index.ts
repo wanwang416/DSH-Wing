@@ -65,6 +65,8 @@ import { setupCommand } from "./commands/setup.js";
 import { createSetupFlow } from "./setup/setup-flow.js";
 import { createWingPanel, type WebServerLike } from "./web/panel.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { createStartMutex } from "./lifecycle/start-mutex.js";
+import { createCredentialRetry } from "./lifecycle/credential-retry.js";
 import { createDoctorPackage, maskCfg, pluginVersion } from "./doctor/package.js";
 import type { ApprovalOutcome, ApprovalRequest } from "@deepseek-ai/dsh-user-approval";
 import type { SelectorItem } from "./interactive/selector.js";
@@ -1131,7 +1133,25 @@ export function apply(ctx: any, rawConfig: unknown): void {
     logger.info?.("企微线路已启动（长连接模式）");
   };
 
-  const startBridge = async (): Promise<void> => {
+  // ★ G10（阶段6a）：启动 in-flight 互斥——并发调用共享同一个 promise（双管线防掉）；
+  //   成功/失败都清 in-flight（失败可重试）。startBridge 本体保持原逻辑（幂等门闩 lifecycleStarted 不变）。
+  // ★ M32（阶段6a）：凭据晚到自动恢复——缺失期间定时轮询（fail-closed 不变），就绪即自动重试启动，
+  //   不再"必须重启宿主"。restart 时随 stop/start 同步起停。
+  const credentialRetry = createCredentialRetry({
+    intervalMs: 60_000,
+    logger,
+    describeBlocker: () => {
+      void 0;
+      return lifecycleStarted ? undefined : startBlocker;
+    },
+    tryStart: async () => {
+      await startBridgeInner();
+    },
+  });
+  const startBridge = createStartMutex(async (): Promise<void> => {
+    await startBridgeInner();
+  });
+  const startBridgeInner = async (): Promise<void> => {
     if (lifecycleStarted) return;
     try {
       // 1) 凭据
@@ -1206,7 +1226,23 @@ export function apply(ctx: any, rawConfig: unknown): void {
     } catch (err) {
       startBlocker = describeError(err);
       logger.error?.(`bridge 启动失败: ${startBlocker}`);
+      // ★ G9（阶段6a）：启动中途失败 → 回收已建立的部分，不留半成品资源
+      await cleanupPartialStart();
     }
+  };
+
+  /** ★ G9（阶段6a）：启动中途失败的集中回退——按建立的逆序回收，每步独立 catch（回退不抛） */
+  const cleanupPartialStart = async (): Promise<void> => {
+    try { modelSync.stop(); } catch { /* 忽略 */ }
+    try { turnSupervisor.stop(); } catch { /* 忽略 */ }
+    if (wecomClient) {
+      try { await wecomClient.stop(); } catch { /* 忽略 */ }
+      wecomClient = undefined;
+    }
+    try { await supervisor.stop(); } catch { /* 忽略 */ }
+    try { await outbox.stop(); } catch { /* 忽略 */ }
+    // larkClient 无显式 stop（WS 归 supervisor 管），置空引用即可
+    larkClient = undefined;
   };
 
   const stopBridge = async (): Promise<void> => {
@@ -1253,6 +1289,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
 
   ctx.effect(() => {
     void startBridge();
+    credentialRetry.start(); // ★ M32：凭据缺失时定时重试（缺失→就绪自动恢复，无需重启宿主）
     // 空闲清理：每 10 分钟 dispose 空闲 30 分钟的 agent
     const sweep = setInterval(() => {
       void (async () => {
@@ -1267,6 +1304,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
       disposeAskPatch();
       disposeApproval();
       clearInterval(sweep);
+      credentialRetry.stop(); // ★ M32：插件 dispose 停轮询（不残留定时器）
       await stopBridge();
     };
   });
