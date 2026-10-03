@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ★ 阶段 6d · 先红测试（A 组：面板/传输健壮性；B 组：权限/工作区配置）
  *
  * 每条对应旧实现必红的行为缺陷；夹具全可控（mock webServer / 临时目录）。
@@ -202,9 +202,9 @@ describe("6d B组 · M27 workspaceRoot 缺省", () => {
       expect(r2.defaulted).toBe(false);
       expect(r2.root).toBe(join(dir, "ws"));
       // 回归锚：转义缺陷——路径不许丢反斜杠（'D:/DSH_HOME\wing-workspace' 字面量曾被吞成 'D:dshwing-workspace'）
-      const r3 = resolve(undefined, "D:/DSH_HOME\\wing");
-      expect(r3.root).toContain("dsh");
-      expect(r3.root).not.toBe("D:dshwing-workspace");
+      const r3 = resolve(undefined, "C:/test-home\\wing");
+      expect(r3.root).toContain("test-home");
+      expect(r3.root).not.toBe("C:test-homewing-workspace");
     } finally {
       rmrf(dir);
     }

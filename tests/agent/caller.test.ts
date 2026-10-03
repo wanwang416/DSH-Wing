@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+﻿import { describe, expect, it, vi } from "vitest";
 import { dirname, join } from "node:path";
 import { createAgent, resumeAgent } from "../../src/agent/caller.js";
+import { stateDir } from "../../src/config/defaults.js";
 
 /** mock agent 结果（agents.create/resume 返回） */
 function makeAgentResult() {
@@ -76,7 +77,7 @@ describe("createAgent workspaceRoot 传递（M4 任务 4b）", () => {
     const meta = agentsCreate.mock.calls[0][0].meta as { cwd: string };
     // ★ M27（阶段6d）有意行为变更：旧断言 process.cwd()（宿主目录，agent 会在宿主目录动手）
     //   → 新缺省 = dirname(stateDir)/wing-workspace（专用工作区，由 stateDir 推导非硬编码）
-    expect(meta.cwd).toBe(join(dirname("D:/DSH_HOME\\wing"), "wing-workspace"));
+    expect(meta.cwd).toBe(join(dirname(stateDir()), "wing-workspace"));
     expect(meta.cwd).not.toBe(process.cwd());
   });
 
@@ -164,7 +165,7 @@ describe("resumeAgent（重启恢复）", () => {
     (ctx.agents as any).resume = vi.fn().mockImplementation(makeAgentResult);
     await resumeAgent(makeDeps(ctx), "feishu:oc_3:def:0");
     // ★ M27（阶段6d）有意行为变更：同 createAgent，缺省 = dirname(stateDir)/wing-workspace
-    expect(workspaceCreate.mock.calls[0][0]).toBe(join(dirname("D:/DSH_HOME\\wing"), "wing-workspace"));
+    expect(workspaceCreate.mock.calls[0][0]).toBe(join(dirname(stateDir()), "wing-workspace"));
     expect(workspaceCreate.mock.calls[0][0]).not.toBe(process.cwd());
   });
 
