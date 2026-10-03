@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { dirname, join } from "node:path";
 import { createAgent, resumeAgent } from "../../src/agent/caller.js";
 
 /** mock agent 结果（agents.create/resume 返回） */
@@ -69,11 +70,14 @@ describe("createAgent workspaceRoot 传递（M4 任务 4b）", () => {
     expect(workspaceCreate.mock.calls[0][1]).toBe("My Workspace");
   });
 
-  it("未传 workspaceRoot → 回退 process.cwd()", async () => {
+  it("未传 workspaceRoot → 回退 M27 缺省（dirname(stateDir)/wing-workspace，非宿主 cwd）", async () => {
     const { ctx, agentsCreate } = makeCtx();
     await createAgent(makeDeps(ctx), "oc_1");
     const meta = agentsCreate.mock.calls[0][0].meta as { cwd: string };
-    expect(meta.cwd).toBe(process.cwd());
+    // ★ M27（阶段6d）有意行为变更：旧断言 process.cwd()（宿主目录，agent 会在宿主目录动手）
+    //   → 新缺省 = dirname(stateDir)/wing-workspace（专用工作区，由 stateDir 推导非硬编码）
+    expect(meta.cwd).toBe(join(dirname("D:/DSH_HOME\\wing"), "wing-workspace"));
+    expect(meta.cwd).not.toBe(process.cwd());
   });
 
   it("session 归属 workspace：attachSession 用 createAgent 的 sessionId", async () => {
@@ -155,11 +159,13 @@ describe("resumeAgent（重启恢复）", () => {
     expect(handle.sessionId).toBe("feishu:oc_2:abc:0");
   });
 
-  it("未传 workspaceRoot → resume attach 用 process.cwd()", async () => {
+  it("未传 workspaceRoot → resume attach 用 M27 缺省（非宿主 cwd）", async () => {
     const { ctx, workspaceCreate } = makeCtx();
     (ctx.agents as any).resume = vi.fn().mockImplementation(makeAgentResult);
     await resumeAgent(makeDeps(ctx), "feishu:oc_3:def:0");
-    expect(workspaceCreate.mock.calls[0][0]).toBe(process.cwd());
+    // ★ M27（阶段6d）有意行为变更：同 createAgent，缺省 = dirname(stateDir)/wing-workspace
+    expect(workspaceCreate.mock.calls[0][0]).toBe(join(dirname("D:/DSH_HOME\\wing"), "wing-workspace"));
+    expect(workspaceCreate.mock.calls[0][0]).not.toBe(process.cwd());
   });
 
   it("resume 事件回调 → 从 sessionId 反推 chatId 触发 onSessionEvent", async () => {

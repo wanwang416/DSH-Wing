@@ -1,3 +1,6 @@
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
 /**
  * dsh-wing 默认配置（M1）
  *
@@ -114,4 +117,26 @@ export function getConfig(ctx: unknown, rawConfig: unknown): WingConfig {
     reactions: { ...DEFAULT_CONFIG.reactions, ...(raw.reactions ?? {}) },
     wecom: { ...DEFAULT_CONFIG.wecom, ...(raw.wecom ?? {}) },
   };
+}
+
+/** 状态目录：<DSH_HOME>/wing（可用 DSH_WING_HOME 覆盖）——★ M27 起由 config 模块持有（原 index.ts 内，
+ *  迁出以免 caller→index 循环依赖），index.ts re-export 保持既有 import 路径兼容 */
+export function stateDir(): string {
+  return process.env.DSH_WING_HOME ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "wing");
+}
+
+/**
+ * ★ M27（阶段6d）：workspaceRoot 缺省解析——旧实现 caller 直接 `process.cwd()` 兜底，
+ *   未配置时 agent 的文件读写落在宿主目录而非插件工作区。
+ *   新缺省：**由状态目录推导**——`dirname(stateDir)/wing-workspace`（与运行数据 wing 同级、
+ *   命名对应，属插件自有地盘）。不硬编码绝对路径：DSH_HOME 未来搬迁时缺省跟着走
+ *   （意图用代码表达，不把当前环境写死）。显式配置照用。
+ *   返回 defaulted 标记，调用方据此打 warn（不许静默用缺省）。
+ */
+export function resolveWorkspaceRoot(
+  configured: string | undefined,
+  stateDir: string,
+): { root: string; defaulted: boolean } {
+  if (configured && configured.trim()) return { root: configured, defaulted: false };
+  return { root: join(dirname(stateDir), "wing-workspace"), defaulted: true };
 }

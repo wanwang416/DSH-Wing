@@ -13,6 +13,7 @@ import { applyPermission } from "./permission.js";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { appendFileSync } from "node:fs";
 import type { PermissionMode } from "../config/defaults.js";
+import { resolveWorkspaceRoot, stateDir } from "../config/defaults.js";
 
 export interface CreateAgentDeps {
   ctx: any;
@@ -82,7 +83,13 @@ async function attachWorkspace(ctx: any, cwd: string, sessionId: string, logger?
 export async function createAgent(deps: CreateAgentDeps, chatId: string): Promise<WingAgentHandle> {
   const { ctx } = deps;
   let sessionId = makeSessionId(chatId, deps.sessionPrefix);
-  const cwd = deps.workspaceRoot ?? process.cwd();
+  // ★ M27（阶段6d）：未配置 workspaceRoot 不再静默用宿主 cwd——
+  //   resolveWorkspaceRoot 由 stateDir 推导专用工作区 + defaulted 标记；caller 每次建 agent 打 warn 提示配置。
+  const resolvedWs = resolveWorkspaceRoot(deps.workspaceRoot, stateDir());
+  const cwd = resolvedWs.root;
+  if (resolvedWs.defaulted) {
+    deps.logger?.warn?.(`workspaceRoot 未配置，使用缺省工作区 ${cwd}（非宿主目录）。建议在 config 配置 workspaceRoot 指定专用工作区`);
+  }
 
   // P1-2 live 模型对象（override 优先，否则派生 GUI 默认；installModelSelection 传引用 → 切模型无需重建会话）
   // 当前 GUI 模型选择（DSH agent 必须有 provider/model，否则 turn 失败）
@@ -239,8 +246,12 @@ export async function resumeAgent(deps: CreateAgentDeps, sessionId: string): Pro
   if (!owned?.agent) throw new Error(`agents.resume 未返回 agent（sessionId=${sessionId}）`);
   const agent = owned.agent;
 
-  // workspace attach（resume 的 session 同样归属工作区）
-  await attachWorkspace(ctx, deps.workspaceRoot ?? process.cwd(), sessionId, deps.logger);
+  // workspace attach（resume 的 session 同样归属工作区）——★ M27：同 resolveWorkspaceRoot 缺省，不用宿主 cwd
+  const resumedWs = resolveWorkspaceRoot(deps.workspaceRoot, stateDir());
+  if (resumedWs.defaulted) {
+    deps.logger?.warn?.(`workspaceRoot 未配置，使用缺省工作区 ${resumedWs.root}（非宿主目录）。建议在 config 配置 workspaceRoot 指定专用工作区`);
+  }
+  await attachWorkspace(ctx, resumedWs.root, sessionId, deps.logger);
 
   // 权限应用（resume 的 agent 同样设置）★ X5：chatId 从 sessionId 反推，按会话解析
   applyPermission(ctx, agent, deps.resolvePermission(chatIdOf), deps.logger);

@@ -78,9 +78,10 @@ export interface BridgeCommandServices {
   resumeSession?(chatId: string): Promise<{ resumed: boolean; sessionId?: string }>;
   /** P1-3：工作区显示/切换（/workspace） */
   workspace?: {
-    get(): string;
-    /** 校验路径存在 + 设置为新工作区；成功返回 true */
-    set(path: string): boolean;
+    /** ★ M39（阶段6d）：per-chat——本会话 override 优先，未设置回退全局默认 */
+    get(chatId: string): string;
+    /** 校验路径存在 + 只写本会话 override（不改全局）；成功返回 true */
+    set(chatId: string, path: string): boolean;
   };
   /** P1-3：手动注入消息（/steer；running→steer，idle→followup；无 agent → no-agent） */
   steer?(chatId: string, text: string): Promise<"steered" | "queued" | "no-agent">;

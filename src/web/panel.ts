@@ -19,6 +19,7 @@ export interface WebServerLike {
 }
 
 interface ResLike {
+  headersSent?: boolean;
   writeHead(status: number, headers: Record<string, string>): unknown;
   end(body?: unknown): unknown;
 }
@@ -84,7 +85,7 @@ export interface WingPanelDeps {
     isBusy(): boolean;
     hasCredential(): Promise<boolean>;
   };
-  logger?: { info?: (m: string) => void; warn?: (m: string) => void };
+  logger?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
 }
 
 /** appId 打码（保留首尾，中段隐藏） */
@@ -97,13 +98,38 @@ export function maskAppId(id: string | undefined): string | undefined {
 /** 组装面板后端；返回 register(webServer) 挂载函数 */
 export function createWingPanel(deps: WingPanelDeps) {
   return {
-    register(webServer: WebServerLike): void {
+    register(webServer: WebServerLike): () => void {
       deps.logger?.info?.("web panel: /plugins/dsh-wing/{status,qr,setup} routes ready");
+      // ★ M29（阶段6d）：收集全部注销函数——旧实现丢弃 register 返回值，插件卸载/热重载时
+      //   路由不注销 → 残留路由 + 旧闭包泄漏。返回 dispose 供 ctx.inject 回调返回值链进 cordis effect。
+      const unregisters: Array<() => void> = [];
+      const reg = webServer.register.bind(webServer) as typeof webServer.register;
+      const add = (r: { kind: "exact" | "prefix"; path: string; handler: (req: unknown, res: unknown) => void }) => {
+        unregisters.push(reg(r));
+      };
+      // ★ M30（阶段6d）：async handler 统一 try/catch 外壳——async 抛错成未处理 rejection，
+      //   请求挂起（用户侧转圈）。包壳后 500 + warn 留痕，不静默挂起。
+      //   来源校验 isAllowedOrigin 在原 handler 内先行执行（5c 语义不动，异常壳只兜 throw）。
+      const safe = (path: string, handler: (req: unknown, res: unknown) => void | Promise<void>) =>
+        async (req: unknown, res: unknown) => {
+          try {
+            await handler(req, res);
+          } catch (err) {
+            deps.logger?.error?.(`web panel: ${path} handler 失败: ${err instanceof Error ? err.message : String(err)}`);
+            try {
+              const r = res as ResLike;
+              if (!r.headersSent) r.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+              r.end(JSON.stringify({ ok: false, reason: "internal error" }));
+            } catch {
+              // res 已失效（连接断开）——日志已留痕，不再抛
+            }
+          }
+        };
       // GET status
-      webServer.register({
+      add({
         kind: "exact",
         path: "/plugins/dsh-wing/status",
-        handler: async (_req, res) => {
+        handler: safe("/status", async (_req, res) => {
           const r = res as ResLike;
           const q = _req as ReqLike;
           if (!isAllowedOrigin(q.headers)) return rejectOrigin(r, "/status", deps.logger);
@@ -129,14 +155,14 @@ export function createWingPanel(deps: WingPanelDeps) {
               busy: deps.setup.isBusy(),
             }),
           );
-        },
+        }),
       });
 
       // GET qr（setup 流程中的二维码 PNG）
-      webServer.register({
+      add({
         kind: "exact",
         path: "/plugins/dsh-wing/qr",
-        handler: (_req, res) => {
+        handler: safe("/qr", (_req, res) => {
           const r = res as ResLike;
           if (!isAllowedOrigin((_req as ReqLike).headers)) return rejectOrigin(r, "/qr", deps.logger);
           const qr = deps.setup.getActiveQr();
@@ -147,14 +173,14 @@ export function createWingPanel(deps: WingPanelDeps) {
             r.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
             r.end("no active dsh-wing setup qr (run /setup or click 扫码连接 in the panel)");
           }
-        },
+        }),
       });
 
       // POST setup（Web 触发扫码注册；无 chatId → 静默完成）
-      webServer.register({
+      add({
         kind: "exact",
         path: "/plugins/dsh-wing/setup",
-        handler: (req, res) => {
+        handler: safe("/setup", (req, res) => {
           const r = res as ResLike;
           if (!isAllowedOrigin((req as ReqLike).headers)) return rejectOrigin(r, "/setup", deps.logger);
           const { method = "" } = req as ReqLike;
@@ -172,14 +198,14 @@ export function createWingPanel(deps: WingPanelDeps) {
           void deps.setup.start(undefined); // 后台注册，QR 经 /qr 供面板轮询
           r.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           r.end(JSON.stringify({ ok: true }));
-        },
+        }),
       });
 
       // POST wecom/setup（M2：Web 触发企微扫码注册；无 chatId → 静默完成）
-      webServer.register({
+      add({
         kind: "exact",
         path: "/plugins/dsh-wing/wecom/setup",
-        handler: (req, res) => {
+        handler: safe("/wecom/setup", (req, res) => {
           const r = res as ResLike;
           if (!isAllowedOrigin((req as ReqLike).headers)) return rejectOrigin(r, "/wecom/setup", deps.logger);
           const { method = "" } = req as ReqLike;
@@ -197,16 +223,16 @@ export function createWingPanel(deps: WingPanelDeps) {
           void deps.wecomSetup.start(); // 后台注册，QR 经 /wecom/qr 读取
           r.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           r.end(JSON.stringify({ ok: true }));
-        },
+        }),
       });
 
       // GET wecom/qr（M2/N4/N6 + ★G13 阶段5c）：当前企微二维码 PNG——GET 收敛为**纯只读**：
       //   有活跃二维码 → 返回 PNG；无二维码 → 不再自动发起（原 L186-192 GET 副作用移除，防跨站/预取触发扫码），
       //   统一 409/202 提示走 POST /wecom/setup。已绑定且无流程 → 409 防误扫重绑（N6 保留）
-      webServer.register({
+      add({
         kind: "exact",
         path: "/plugins/dsh-wing/wecom/qr",
-        handler: async (req, res) => {
+        handler: safe("/wecom/qr", async (req, res) => {
           const r = res as ResLike;
           if (!isAllowedOrigin((req as ReqLike).headers)) return rejectOrigin(r, "/wecom/qr", deps.logger);
           const { url = "" } = req as ReqLike;
@@ -226,8 +252,13 @@ export function createWingPanel(deps: WingPanelDeps) {
           // ★ G13：GET 不再自动发起扫码（副作用只留 POST /wecom/setup）；提示客户端改走 POST
           r.writeHead(202, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           r.end(JSON.stringify({ ok: false, reason: "暂无活跃二维码。请 POST /plugins/dsh-wing/wecom/setup 发起扫码（GET 不再自动发起）" }));
-        },
+        }),
       });
+      // ★ M29：dispose = 全部路由注销（逆序不必要——host 各路由独立，顺序注销即可）
+      return () => {
+        for (const un of unregisters) un();
+        deps.logger?.info?.(`web panel: ${unregisters.length} 条路由已注销`);
+      };
     },
   };
 }

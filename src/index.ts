@@ -16,7 +16,8 @@ import { homedir } from "node:os";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
-import { getConfig, type WingConfig, type PermissionMode } from "./config/defaults.js";
+import { getConfig, stateDir, resolveWorkspaceRoot, type WingConfig, type PermissionMode } from "./config/defaults.js";
+import { createWorkspaceOverrideStore } from "./session/workspace-overrides.js";
 import { createCredentialStore } from "./host/credentials.js";
 import { buildLarkClient, type WingLarkClient } from "./host/client.js";
 import { createTransport } from "./host/websocket.js";
@@ -82,10 +83,8 @@ export const name = "dsh-wing";
 
 export const inject = ["tools", "commands", "agents", "systemPrompt", "credentials", "userQuestions"];
 
-/** 状态目录：<DSH_HOME>/wing（可用 DSH_WING_HOME 覆盖） */
-export function stateDir(): string {
-  return process.env.DSH_WING_HOME ?? join(process.env.DSH_HOME ?? join(homedir(), ".dsh"), "wing");
-}
+/** 状态目录：<DSH_HOME>/wing（可用 DSH_WING_HOME 覆盖）——★ M27：实现迁至 config/defaults.ts（此处 re-export 兼容） */
+export { stateDir } from "./config/defaults.js";
 
 export function apply(ctx: any, rawConfig: unknown): void {
   const raw = (rawConfig ?? {}) as { enabled?: boolean };
@@ -320,6 +319,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
   // ★ X5（阶段5）：per-chat 权限覆盖存储（照抄 model-overrides 模式；原子写 + 解析失败 .bak）
   const permissionOverrides = createPermissionOverrideStore(join(dir, "permission-overrides.json"));
 
+  // ★ M39（阶段6d）：per-chat 工作区覆盖存储（同 model-overrides 模式）——
+  //   /workspace 改为按会话生效（A 会话切目录不影响 B 会话），全局 cfg.workspaceRoot 降级为默认值
+  const workspaceOverrides = createWorkspaceOverrideStore(join(dir, "workspace-overrides.json"));
+
   // ---------- P0-3 runtime 可变状态（/mode 只对新消息生效：新建 agent 读 runtime） ----------
   // 拍板：当前运行 agent 权限不变更，避免中途改权限安全漏洞
   const runtime = {
@@ -550,10 +553,12 @@ export function apply(ctx: any, rawConfig: unknown): void {
   });
 
   // ---------- session 映射（createAgent 工厂：resume 优先，权限应用） ----------
-  const makeAgentDeps = (sessionPrefix: string) => ({
+  const makeAgentDeps = (sessionPrefix: string, chatId: string) => ({
     ctx,
     sessionPrefix, // ★ 会话 id 平台前缀（企微必须 wecom:，否则 sessionId 落回 feishu:）
-    workspaceRoot: cfg.workspaceRoot,
+    // ★ M39（阶段6d）：per-chat 工作区解析——override 优先，未设置走全局默认（cfg.workspaceRoot
+    //   或 M27 缺省推导，两层串联同一个 resolveWorkspaceRoot，不各写一套）
+    workspaceRoot: workspaceOverrides.get(chatId) ?? resolveWorkspaceRoot(cfg.workspaceRoot, stateDir()).root,
     agentPreset: runtime.agentPreset,
     // ★ X5：按会话解析权限（override 优先，未设置 → 配置默认值）
     resolvePermission: (chatId: string) => permissionOverrides.resolveFor(chatId, runtime.defaultPermissionMode),
@@ -572,14 +577,14 @@ export function apply(ctx: any, rawConfig: unknown): void {
       const existing = routeStore.get(key);
       if (existing?.sessionId) {
         try {
-          const handle = await resumeAgent(makeAgentDeps(prefix), existing.sessionId);
+          const handle = await resumeAgent(makeAgentDeps(prefix, chatId), existing.sessionId);
           routeStore.upsert({ ...existing, sessionId: handle.sessionId, updatedAt: Date.now() });
           return handle;
         } catch (err) {
           logger.warn?.(`resume 失败（${existing.sessionId}），创建新 session: ${describeError(err)}`);
         }
       }
-      const handle = await createAgent(makeAgentDeps(prefix), chatId);
+      const handle = await createAgent(makeAgentDeps(prefix, chatId), chatId);
       routeStore.upsert({
         sessionKey: key,
         chatId,
@@ -1075,11 +1080,14 @@ export function apply(ctx: any, rawConfig: unknown): void {
       return { resumed: true, sessionId: handle?.sessionId ?? route.sessionId };
     },
     workspace: {
-      get: () => cfg.workspaceRoot ?? process.cwd(),
-      set: (path) => {
+      // ★ M39（阶段6d）：per-chat 化——get(chatId) 会话 override 优先，未设置回退全局配置（cfg.workspaceRoot
+      //   或 M27 的缺省推导）；set(chatId, path) 只写该会话的 override（workspace-overrides.json 落盘），
+      //   不再改全局 cfg.workspaceRoot（A 会话切换不再影响 B 会话；全局默认值永远不动）。
+      get: (chatId: string) => workspaceOverrides.get(chatId) ?? resolveWorkspaceRoot(cfg.workspaceRoot, stateDir()).root,
+      set: (chatId: string, path: string) => {
         try {
           if (!existsSync(path) || !statSync(path).isDirectory()) return false;
-          cfg.workspaceRoot = path;
+          workspaceOverrides.set(chatId, path);
           return true;
         } catch {
           return false;
@@ -1336,7 +1344,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
       },
       logger,
     });
-    return panel.register(webCtx.webServer);
+    // ★ M29（阶段6d）：dispose 返回给 cordis effect——ctx.inject 回调的返回值即清理函数，
+    //   插件卸载/热重载时自动调用（路由全注销，防残留路由+旧闭包泄漏）。
+    const disposePanel = panel.register(webCtx.webServer);
+    return () => disposePanel();
   });
 
   ctx.effect(() => {

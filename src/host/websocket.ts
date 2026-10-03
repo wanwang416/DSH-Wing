@@ -149,7 +149,14 @@ export function createTransport(deps: TransportDeps) {
 
   async function handleEvent(event: string, data: unknown): Promise<void> {
     lastEventAt = Date.now();
-    deps.onEvent?.(event, data);
+    // ★ M31（阶段6d）：onEvent 包 try/catch——某个事件处理抛错（如撤回/表情 handler 异常）
+    //   旧实现直接中断 handleEvent → 该 client 后续事件全部丢失（表现为"机器人突然不响应"）。
+    //   一个坏事件不许拖垮后续事件：warn 留痕后继续走。
+    try {
+      deps.onEvent?.(event, data);
+    } catch (err) {
+      deps.logger?.error?.(`onEvent 失败（事件=${event}，后续事件不受影响）: ${err instanceof Error ? err.message : String(err)}`);
+    }
     if (event !== EVENT_MESSAGE) return;
     try {
       await deps.onMessage(data);
