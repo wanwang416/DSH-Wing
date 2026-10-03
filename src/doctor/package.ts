@@ -6,7 +6,7 @@
  *
  * 铁律：配置强制脱敏（app_secret/token/bossOpenId 打码），日志不含完整聊天记录。
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
@@ -49,10 +49,25 @@ export function maskCredential(c: LarkCredential): Record<string, string> {
   return { appId: mask(c.appId), appSecret: "***", domain: c.domain };
 }
 
-/** 配置序列化（bossOpenId 半敏感，打码；其余字段无敏感信息） */
+/**
+ * 配置序列化脱敏（★ G11 阶段5c 重写：逐字段过 WingConfig，判断标准 = 泄露后能否冒充机器人/ALAN）。
+ * 敏感项：
+ *   - wecom.secret        → 企微机器人 AppSecret，泄露 = 冒充机器人 → 全打码
+ *   - bossOpenId          → 老板身份，泄露 = 可伪造审批语境 → 半打码
+ *   - wecomBossUserId     → 企微老板身份（审批/提权校验依据）→ 半打码
+ *   - credentialRef       → 凭据引用名（非值本身），保留——凭据值在 DSH credential store，不进 cfg
+ * 其余字段（streaming/permissionMode/groupPolicy/reactions/turnTimeoutMs/agentPreset 等）
+ * 均为行为配置，泄露无冒充风险 → 保留（agent 排障仍可读）。
+ */
 export function maskCfg(cfg: WingConfig): Record<string, unknown> {
   const out = { ...cfg } as Record<string, unknown>;
   if (typeof out.bossOpenId === "string") out.bossOpenId = mask(out.bossOpenId);
+  if (typeof out.wecomBossUserId === "string") out.wecomBossUserId = mask(out.wecomBossUserId);
+  if (out.wecom && typeof out.wecom === "object") {
+    out.wecom = { ...(out.wecom as Record<string, unknown>) };
+    const w = out.wecom as Record<string, unknown>;
+    if (typeof w.secret === "string") w.secret = "***";
+  }
   return out;
 }
 
@@ -89,12 +104,35 @@ export function pluginVersion(): string {
   return root ? readVersion(join(root, "package.json")) : "unknown";
 }
 
-/** 读文件尾部 n 行；文件不存在/读失败返回 undefined（跳过收录） */
-function tailLines(path: string, n: number): string | undefined {
+/** 读文件尾部 n 行；文件不存在/读失败返回 undefined（跳过收录）。
+ *  ★ M37（阶段5c）：不再全量 readFileSync（日志可达 180MB 级）——按 n 行 × 估计行长（256B/行，下限 64KB）
+ *  只读尾部窗口（O(1) 内存），窗口切行取最后 n 行；若窗口首行非文件起点且首行不是完整行，
+ *  丢弃半行（宁少一行不串内容）。全仓调用点（插件日志/宿主日志/sdk-debug）统一受益。 */
+export function tailLines(path: string, n: number): string | undefined {
   try {
     if (!existsSync(path)) return undefined;
-    const raw = readFileSync(path, "utf8");
-    return raw.split(/\r?\n/).slice(-n).join("\n");
+    const size = statSync(path).size;
+    const windowBytes = Math.min(size, Math.max(64 * 1024, n * 256));
+    const start = size - windowBytes;
+    let raw: string;
+    if (start <= 0) {
+      raw = readFileSync(path, "utf8");
+    } else {
+      const buf = Buffer.alloc(windowBytes);
+      const fd = openSync(path, "r");
+      try {
+        readSync(fd, buf, 0, windowBytes, start);
+      } finally {
+        closeSync(fd);
+      }
+      raw = buf.toString("utf8");
+      // 窗口起点在行中间 → 丢弃首个不完整行（除非 start 恰在行首——无法低成本判断，统一丢弃首段到首个换行）
+      const firstNl = raw.indexOf("\n");
+      if (firstNl >= 0) raw = raw.slice(firstNl + 1);
+    }
+    const lines = raw.split(/\r?\n/);
+    if (lines[lines.length - 1] === "") lines.pop(); // 结尾换行产生的空尾段
+    return lines.slice(-n).join("\n");
   } catch {
     return undefined;
   }

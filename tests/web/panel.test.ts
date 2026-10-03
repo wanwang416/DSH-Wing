@@ -213,7 +213,7 @@ describe("createWingPanel wecom routes（M2/N4/N6）", () => {
     expect(Buffer.isBuffer(calls[1].body)).toBe(true);
   });
 
-  it("GET wecom/qr 无 QR 无凭据 → 202 自动发起（N4）", async () => {
+  it("★5c G13：GET wecom/qr 无 QR（无凭据）→ 202 提示走 POST，不再自动发起（GET 副作用移除）", async () => {
     const { server, routes } = mockWebServer();
     const { deps, wecomSetup } = makeDeps();
     createWingPanel(deps).register(server);
@@ -221,10 +221,13 @@ describe("createWingPanel wecom routes（M2/N4/N6）", () => {
     const { res, calls } = fakeRes();
     await routes[i].handler({}, res);
     expect(calls[0].status).toBe(202);
-    expect(wecomSetup.start).toHaveBeenCalledTimes(1);
+    // ★ 阿深修正（2026-10-02 验收）：fakeRes 把 writeHead 与 end 分别推入 calls——
+    //   calls[0] 只有 status，body 在 calls[1]（本文件其他用例即用 calls[1].body）。实现行为正确。
+    expect(String(calls[1].body)).toContain("POST");
+    expect(wecomSetup.start).not.toHaveBeenCalled();
   });
 
-  it("GET wecom/qr 已绑定且无流程 → 409；?force=1 → 202（N6）", async () => {
+  it("★5c G13：GET wecom/qr 已绑定且无流程 → 409；?force=1 也不自动发起（副作用只留 POST）", async () => {
     const { server, routes } = mockWebServer();
     const { deps, wecomSetup } = makeDeps();
     wecomSetup.hasCredential.mockResolvedValue(true);
@@ -236,11 +239,12 @@ describe("createWingPanel wecom routes（M2/N4/N6）", () => {
     expect(wecomSetup.start).not.toHaveBeenCalled();
     const { res: res2, calls: calls2 } = fakeRes();
     await routes[i].handler({ url: QR + "?force=1" }, res2);
+    // force=1 语义收敛：GET 永不发起扫码（原 202+start 移除），202 提示改走 POST
     expect(calls2[0].status).toBe(202);
-    expect(wecomSetup.start).toHaveBeenCalledTimes(1);
+    expect(wecomSetup.start).not.toHaveBeenCalled();
   });
 
-  it("GET wecom/qr busy 无 QR → 202 进行中，不重复发起", async () => {
+  it("★5c G13：GET wecom/qr busy 无 QR → 202 提示等待（不发起、不重复）", async () => {
     const { server, routes } = mockWebServer();
     const { deps, wecomSetup } = makeDeps();
     wecomSetup.isBusy.mockReturnValue(true);
@@ -249,7 +253,9 @@ describe("createWingPanel wecom routes（M2/N4/N6）", () => {
     const { res, calls } = fakeRes();
     await routes[i].handler({}, res);
     expect(calls[0].status).toBe(202);
-    expect(String(calls[1].body)).toContain("进行中");
+    // ★ 阿深修正（2026-10-02 验收）：fakeRes 把 writeHead 与 end 分别推入 calls——
+    //   calls[0] 只有 status，body 在 calls[1]（本文件其他用例即用 calls[1].body）。实现行为正确。
+    expect(String(calls[1].body)).toContain("POST");
     expect(wecomSetup.start).not.toHaveBeenCalled();
   });
 });

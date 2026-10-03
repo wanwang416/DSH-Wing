@@ -65,7 +65,7 @@ import { setupCommand } from "./commands/setup.js";
 import { createSetupFlow } from "./setup/setup-flow.js";
 import { createWingPanel, type WebServerLike } from "./web/panel.js";
 import { doctorCommand } from "./commands/doctor.js";
-import { createDoctorPackage, pluginVersion } from "./doctor/package.js";
+import { createDoctorPackage, maskCfg, pluginVersion } from "./doctor/package.js";
 import type { ApprovalOutcome, ApprovalRequest } from "@deepseek-ai/dsh-user-approval";
 import type { SelectorItem } from "./interactive/selector.js";
 import { createTurnSupervisor } from "./agent/turn-supervisor.js";
@@ -812,7 +812,10 @@ export function apply(ctx: any, rawConfig: unknown): void {
       render: (_args: unknown, value: string) => [{ type: "text", text: value }],
     },
     async execute() {
-      return JSON.stringify(cfg, null, 2);
+      // ★ G11（阶段5c）：走与 /doctor 打包同一套脱敏（maskCfg）——裸的完整 cfg 会把
+      //   wecom.secret / bossOpenId / wecomBossUserId 明文喂给 agent（静默外泄面）。
+      //   不复制另一套逻辑；非敏感字段保留，agent 排障能力不受影响。
+      return JSON.stringify(maskCfg(cfg), null, 2);
     },
   }));
 

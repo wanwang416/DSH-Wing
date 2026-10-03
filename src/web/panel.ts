@@ -26,6 +26,44 @@ interface ResLike {
 interface ReqLike {
   method?: string;
   url?: string;
+  headers?: Record<string, string | string[] | undefined>;
+}
+
+/**
+ * ★ G13（阶段5c）：面板访问来源校验（CSRF / 跨站钉死）。
+ * 策略（不破坏 DSH GUI 与本机使用）：
+ *   - 无 Origin 且无 Referer（curl / GUI 内部请求 / 同源导航的常见形态）→ 放行；
+ *   - 带 Origin 或 Referer 时：host 必须是本机回环（127.0.0.1 / localhost / [::1]）→ 放行；
+ *   - 其余（任何非回环来源，含跨站 evil 域名）→ 拒绝（403）+ warn 留痕。
+ * 不加 token 强校验：/status 等只读接口是 GUI 轮询依赖，token 会破坏现有访问。
+ */
+export function isAllowedOrigin(headers: Record<string, string | string[] | undefined> | undefined): boolean {
+  if (!headers) return true;
+  const pick = (k: string): string | undefined => {
+    const v = headers[k];
+    return Array.isArray(v) ? v[0] : v;
+  };
+  const origin = pick("origin");
+  const referer = pick("referer");
+  if (!origin && !referer) return true; // 无来源头 = 非浏览器 / 同源直连 → 放行
+  const isLoopback = (u: string): boolean => {
+    try {
+      const h = new URL(u).hostname;
+      return h === "127.0.0.1" || h === "localhost" || h === "[::1]" || h === "::1";
+    } catch {
+      return false;
+    }
+  };
+  if (origin && !isLoopback(origin)) return false;
+  if (!origin && referer && !isLoopback(referer)) return false;
+  return true;
+}
+
+/** 来源被拒的统一收口：403 + warn 留痕（不许静默 200，铁律 3） */
+function rejectOrigin(res: ResLike, path: string, logger?: { warn?(m: string): void }): void {
+  logger?.warn?.(`web panel：来源校验拒绝（跨站来源访问 ${path}）→ 403`);
+  res.writeHead(403, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(JSON.stringify({ ok: false, reason: "origin not allowed（仅限本机回环来源访问）" }));
 }
 
 export interface WingPanelDeps {
@@ -67,6 +105,8 @@ export function createWingPanel(deps: WingPanelDeps) {
         path: "/plugins/dsh-wing/status",
         handler: async (_req, res) => {
           const r = res as ResLike;
+          const q = _req as ReqLike;
+          if (!isAllowedOrigin(q.headers)) return rejectOrigin(r, "/status", deps.logger);
           const cred = await deps.resolveCredential();
           const st = deps.status.get();
           r.writeHead(200, {
@@ -98,6 +138,7 @@ export function createWingPanel(deps: WingPanelDeps) {
         path: "/plugins/dsh-wing/qr",
         handler: (_req, res) => {
           const r = res as ResLike;
+          if (!isAllowedOrigin((_req as ReqLike).headers)) return rejectOrigin(r, "/qr", deps.logger);
           const qr = deps.setup.getActiveQr();
           if (qr) {
             r.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "no-store" });
@@ -115,6 +156,7 @@ export function createWingPanel(deps: WingPanelDeps) {
         path: "/plugins/dsh-wing/setup",
         handler: (req, res) => {
           const r = res as ResLike;
+          if (!isAllowedOrigin((req as ReqLike).headers)) return rejectOrigin(r, "/setup", deps.logger);
           const { method = "" } = req as ReqLike;
           if (method.toUpperCase() !== "POST") {
             r.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
@@ -139,6 +181,7 @@ export function createWingPanel(deps: WingPanelDeps) {
         path: "/plugins/dsh-wing/wecom/setup",
         handler: (req, res) => {
           const r = res as ResLike;
+          if (!isAllowedOrigin((req as ReqLike).headers)) return rejectOrigin(r, "/wecom/setup", deps.logger);
           const { method = "" } = req as ReqLike;
           if (method.toUpperCase() !== "POST") {
             r.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
@@ -157,12 +200,15 @@ export function createWingPanel(deps: WingPanelDeps) {
         },
       });
 
-      // GET wecom/qr（M2/N4/N6）：当前企微二维码 PNG；无活跃流程自动发起（isWecomBusy 幂等）；已绑定且无流程 → 409
+      // GET wecom/qr（M2/N4/N6 + ★G13 阶段5c）：当前企微二维码 PNG——GET 收敛为**纯只读**：
+      //   有活跃二维码 → 返回 PNG；无二维码 → 不再自动发起（原 L186-192 GET 副作用移除，防跨站/预取触发扫码），
+      //   统一 409/202 提示走 POST /wecom/setup。已绑定且无流程 → 409 防误扫重绑（N6 保留）
       webServer.register({
         kind: "exact",
         path: "/plugins/dsh-wing/wecom/qr",
         handler: async (req, res) => {
           const r = res as ResLike;
+          if (!isAllowedOrigin((req as ReqLike).headers)) return rejectOrigin(r, "/wecom/qr", deps.logger);
           const { url = "" } = req as ReqLike;
           const qr = deps.wecomSetup.getQr();
           if (qr) {
@@ -177,16 +223,9 @@ export function createWingPanel(deps: WingPanelDeps) {
             r.end(JSON.stringify({ ok: false, reason: "企微机器人已绑定；如需重新绑定请用 ?force=1 或先清除 WING_WECOM_BOT 凭据" }));
             return;
           }
-          if (!deps.wecomSetup.isBusy()) {
-            // N4：自动发起一次（幂等），浏览器只需打开本 URL
-            deps.logger?.info?.("web panel: /wecom/qr 无活跃流程，自动发起企微扫码");
-            void deps.wecomSetup.start();
-            r.writeHead(202, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-            r.end(JSON.stringify({ ok: true, message: "企微扫码流程已发起，请约 2 秒后刷新本 URL 查看二维码" }));
-            return;
-          }
+          // ★ G13：GET 不再自动发起扫码（副作用只留 POST /wecom/setup）；提示客户端改走 POST
           r.writeHead(202, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-          r.end(JSON.stringify({ ok: false, reason: "企微扫码流程进行中，二维码生成后请刷新本 URL" }));
+          r.end(JSON.stringify({ ok: false, reason: "暂无活跃二维码。请 POST /plugins/dsh-wing/wecom/setup 发起扫码（GET 不再自动发起）" }));
         },
       });
     },
