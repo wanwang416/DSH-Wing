@@ -110,6 +110,10 @@ export function createSessionMapper<THandle extends AgentHandleLike>(opts: {
   const creating = new Map<string, Promise<THandle>>();
 
   return {
+    /** ★ M43（阶段6b）：活动刷新点——turn 结束/出站后由上层调用，防空闲清理误删活跃 agent */
+    touch(chatId: string): void {
+      if (agents.has(chatId)) idleAt.set(chatId, Date.now());
+    },
     get(chatId: string): THandle | undefined {
       return agents.get(chatId);
     },

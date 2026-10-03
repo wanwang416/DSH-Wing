@@ -241,6 +241,18 @@ export function apply(ctx: any, rawConfig: unknown): void {
     onTimeout(key) {
       // ★ M4 终审风险2：轮次超时 dispose agent 前先 abort pending，避免用户点按钮后 steer 注入失败
       userQuestionBridge.abortByChatId(key, "turn_timeout");
+      // ★ M41（阶段6b）：先 cancel 当前 turn（保留会话上下文，SDK 收敛到 idle），
+      //   cancel 失败/不可用才 dispose 兜底（超时后锁必须释放，否则卡住下一轮）——别删兜底。
+      const h = mapper?.get?.(key);
+      if (h && typeof h.cancel === "function") {
+        try {
+          h.cancel({ kind: "turn_timeout" });
+          logger.warn?.(`turn 超时：已取消当前轮次（chatId=${key}），上下文保留`);
+          return;
+        } catch (err) {
+          logger.warn?.(`turn 超时：cancel 失败（${err instanceof Error ? err.message : String(err)}），降级 dispose`);
+        }
+      }
       void mapper?.disposeAgentFor?.(key).catch(() => void 0);
     },
     logger,
@@ -536,6 +548,7 @@ export function apply(ctx: any, rawConfig: unknown): void {
     onTurnEnd: (chatId, reason) => {
       void experience.onTurnEnd(chatId, reason);
       turnInitiator.delete(chatId); // ★ G6-B：turn 结束清快照，防下一 turn 误用旧发起者（新 turn 的 queued 会重新快照）
+      mapper?.touch?.(chatId); // ★ M43（阶段6b）：turn 结束刷新活动时间——空闲清理不误删刚活跃过的 agent
     },
     onToolCall: (chatId, name, input) => void experience.onToolCall(chatId, name, input),
     onToolResult: (chatId, name, error) => void experience.onToolResult(chatId, name, error),

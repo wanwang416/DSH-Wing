@@ -21,6 +21,8 @@ export interface WingStatus {
   wecomConnState?: "disconnected" | "connected";
   /** ★ G4（批次 3）：企微 WS 是否就绪（面板可见，旧实现完全看不到企微死活） */
   wecomReady?: boolean;
+  /** 最近一次连接错误描述（★ M4/阶段6b：连接恢复时被清除，不再永久残留） */
+  lastError?: string;
 }
 
 export function createStatusStore(file: string, now: () => number = Date.now) {
@@ -54,7 +56,12 @@ export function createStatusStore(file: string, now: () => number = Date.now) {
     },
     setConn(state: WingStatus["connState"], extra?: Record<string, unknown>) {
       const patch: Partial<WingStatus> = { connState: state, ...extra };
-      if (state === "connected") patch.connectedAt = now();
+      if (state === "connected") {
+        patch.connectedAt = now();
+        // ★ M4（阶段6b）：恢复时显式清 lastError——浅合并下 undefined 键不覆盖，
+        // 必须用 delete（或赋 undefined 且序列化时剔除）才能把旧错误真正清掉。
+        delete status.lastError;
+      }
       status = { ...status, ...patch };
       persist();
       return this.get();

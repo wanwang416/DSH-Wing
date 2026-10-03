@@ -43,6 +43,10 @@ export interface OutboxDeps {
   retryDelayMs?: number;
   /** P1-2A/2B：保留天数——超期 failed 不回队、超期 seg 段回收（基底 config.ts:128 retainDays: 7） */
   retainDays?: number;
+  /** ★ M12（阶段6b）：sentKeys 上限（默认 5000；理由见交付说明——8B/键 × 5000 ≈ 400KB 内存封顶，7 天保留期足够幂等） */
+  sentKeysLimit?: number;
+  /** ★ M12（阶段6b）：done 信封内存保留期（默认 24h；超期从内存清理，段盘上仍在） */
+  envelopeRetentionMs?: number;
   logger?: { info?: (m: string) => void; warn?: (m: string) => void };
   /** 统计变化回调（状态面板用） */
   onStatsChange?(stats: { pending: number; failed: number }): void;
@@ -110,6 +114,42 @@ export function createOutbox(deps: OutboxDeps) {
   /** dedupeKey → 已终结（done / fatal）envelope id（幂等，防重启重发）。
    *  ★ P0-4：failed 不再进此集合——failed 意味着"还能重试"，不是"已终结"。 */
   const sentKeys = new Set<string>();
+  // ★ M12（阶段6b）：容器上限。sentKeys = FIFO 淘汰（Set 迭代序 = 插入序）；envelopes 终态按 updatedAt 清理。
+  const SENT_KEYS_LIMIT = deps.sentKeysLimit ?? 5000;
+  const ENVELOPE_RETENTION_MS = deps.envelopeRetentionMs ?? 24 * 3_600_000;
+
+  /** M12：sentKeys 超 LIMit 时淘汰最旧（插入序），留日志与计数（不许静默） */
+  function trimSentKeys(): number {
+    if (sentKeys.size <= SENT_KEYS_LIMIT) return 0;
+    const overflow = sentKeys.size - SENT_KEYS_LIMIT;
+    let removed = 0;
+    for (const k of sentKeys) {
+      if (removed >= overflow) break;
+      sentKeys.delete(k);
+      removed++;
+    }
+    deps.logger?.info?.(`outbox sentKeys 清理：淘汰最旧 ${removed} 条（上限 ${SENT_KEYS_LIMIT}，现 ${sentKeys.size} 条）`);
+    return removed;
+  }
+
+  /** M12：清理已终结（done/fatal）且超保留期的信封（内存）；pending/sending/failed 绝不清理（红线）。
+   *  段文件在盘上仍全量保留（M46 语义不变），清理只影响内存容器。返回清理条数。 */
+  function 清理终态信封(retentionMs: number): number {
+    const cutoff = Date.now() - retentionMs;
+    let removed = 0;
+    for (const [id, env] of envelopes) {
+      if (env.status === "done" && env.updatedAt < cutoff) {
+        envelopes.delete(id);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      deps.logger?.info?.(
+        `outbox 终态信封清理：删除 ${removed} 条 done 超期条目（保留期 ${retentionMs}ms，现 ${envelopes.size} 条；pending/failed 不受影响）`,
+      );
+    }
+    return removed;
+  }
   let stopped = false;
   let pumpRunning = false;
 
@@ -297,6 +337,8 @@ export function createOutbox(deps: OutboxDeps) {
             sentKeys.add(env.dedupeKey);
             queue.shift();
             append(env);
+            trimSentKeys(); // ★ M12：幂等键上限（淘汰最旧，日志留痕）
+            清理终态信封(ENVELOPE_RETENTION_MS); // ★ M12：终态信封超期清理（pending/failed 绝不动）
           } else {
             const errorText = describeError(result.error);
             env.lastError = errorText;
@@ -383,6 +425,14 @@ export function createOutbox(deps: OutboxDeps) {
   return {
     rebuildFromDisk,
     enqueue,
+    /** ★ M12（阶段6b）：测试与运维可手动触发清理（正常路径在投递成功后自动跑） */
+    清理终态信封,
+    trimSentKeys,
+    /** ★ M12（阶段6b）：只读快照——按 id 查信封（红线断言用：断言"条目还在不在"，不借计数） */
+    getEnvelope(id: string): OutboxEnvelope | undefined {
+      const env = envelopes.get(id);
+      return env ? { ...env } : undefined;
+    },
     async start(): Promise<void> {
       stopped = false;
       rebuildFromDisk();
