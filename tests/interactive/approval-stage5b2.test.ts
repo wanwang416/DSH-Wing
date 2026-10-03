@@ -118,6 +118,55 @@ describe("5b-2 · G6-B 口径：群聊 Always 只对批准者生效（initiatorO
     await new Promise((r) => setTimeout(r, 0));
     expect(b.sendCard).toHaveBeenCalledTimes(2); // 未放行 → 又弹卡
   });
+
+  it("★同源保证：发起者（msg.userId=parser senderOpenId）与批准者（卡片 operator open_id）同源同值 → 命中", async () => {
+    // 真实链路字段同源：入站 msg.userId = raw.sender.sender_id.open_id（parser.ts L116）；
+    // 卡片点击 operatorOpenId = 事件 operator.operator_id.open_id（event-handler.ts L55）。同一 openId 空间。
+    // 老板本人发起 turn（快照=ou_boss）→ 老板点卡（同值）→ Always 记住 ou_boss → 老板再触发命中
+    const b = mkWithInitiator({ oc_group: "ou_boss" });
+    const p = b.bridge.answer(groupReq() as any, next as any);
+    const entryId = entryIdOf(b);
+    b.bridge.onCardAction("oc_group", `approval:${entryId}:always`, "ou_boss"); // 批准者=发起者=老板 openId
+    await expect(p).resolves.toBe("allowed-once");
+    const p2 = b.bridge.answer(groupReq() as any, next as any);
+    await expect(p2).resolves.toBe("allowed-once"); // 同源同值 → 命中
+    expect(b.sendCard).toHaveBeenCalledTimes(1);
+  });
+
+  it("★跨平台交叉（攻击场景）：企微发起者（userid）触发 → 飞书记忆里的 openId 批准者身份不命中，仍弹卡", async () => {
+    // 飞书群里老板（openId）点过 Always；之后**企微**侧发起者（userid 空间）请求同工具：
+    //   两身份不同源、永不相等 → 必须不命中（弹卡），而不是把企微 userid 误配到飞书 openId
+    //   （此用例里两条请求都来自群聊 chatId，但发起者身份一个是 openId 一个是 userid）
+    const b = mkWithInitiator({ oc_group: "wm_LiangXianSheng" }); // 本次 turn 发起者 = 企微 userid
+    const p = b.bridge.answer(groupReq() as any, next as any);
+    const entryId = entryIdOf(b);
+    b.bridge.onCardAction("oc_group", `approval:${entryId}:always`, "ou_boss"); // 批准者 = 飞书 openId（老板，isBoss 过）
+    await expect(p).resolves.toBe("allowed-once");
+    // 下一个 turn 换企微 userid 发起 → 与 openId 不同源永不等 → 不自动放行 → 弹卡
+    const p2 = b.bridge.answer(groupReq() as any, next as any);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(b.sendCard).toHaveBeenCalledTimes(2);
+  });
+
+  it("★反向交叉：企微 userid 批准记入 always → 飞书 openId 发起者不命中（双向同源隔离）", async () => {
+    // 记忆按 chatId+tool 存身份集：企微 userid 与飞书 openId 混入同一 Set 时也不得互相命中。
+    // 预置一条含企微 userid 的 always 记忆（模拟企微侧曾批准），飞书老板发起 → 不命中 → 弹卡
+    const b = mkWithInitiator({ oc_group: "ou_boss" }); // 发起者 = 飞书 openId
+    const p = b.bridge.answer(groupReq() as any, next as any);
+    const entryId = entryIdOf(b);
+    b.bridge.onCardAction("oc_group", `approval:${entryId}:always`, "ou_boss"); // 飞书老板批准（isBoss 过）
+    await expect(p).resolves.toBe("allowed-once");
+    // 手动把企微 userid 混入同一 chatId+tool 的 always 身份集（模拟企微侧批准过同工具）
+    const fsMod = await import("node:fs");
+    const stored = JSON.parse(fsMod.readFileSync(memFile, "utf8")) as Record<string, string[]>;
+    for (const v of Object.values(stored)) v.push("wm_someone"); // 混入企微 userid
+    fsMod.writeFileSync(memFile, JSON.stringify(stored));
+    // 新实例载入（走真实载入路径）：发起者 = 另一个企微 userid（≠ 集内任何身份）→ 不命中 → 弹卡
+    const b2 = mkWithInitiator({ oc_group: "wm_other" });
+    const p2 = b2.bridge.answer(groupReq() as any, next as any);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(b2.sendCard).toHaveBeenCalledTimes(1); // wm_other ≠ 集内任何身份 → 不自动放行 → 弹卡
+  });
 });
 
 // ━━━━━━━━━━━ M6：文本审批按编号匹配（不取第一个） ━━━━━━━━━━━
