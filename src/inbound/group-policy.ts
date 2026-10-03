@@ -27,12 +27,13 @@ export function shouldProcessGroupMessage(msg: ParsedMessage, deps: GroupPolicyD
     case "open":
       return true;
     case "mention": {
-      // ★ 企微适配：企微无 bot open_id（@ 表现为文本 "@机器人名"）；P1-3 意图桥设计意图
-      //   「@ 了任何人 = 点名，不过滤（保守防误吞）」，故 @ 任何成员即命中
-      const mentioned =
-        msg.mentions.includes(botOpenId ?? "") ||
-        (botOpenId ? msg.rawText.includes(`@${botOpenId}`) : false) ||
-        msg.mentions.length > 0;
+      // ★ M19（阶段6c-1）收窄：只认「确实 @ 到机器人本人」。
+      //   旧实现 `mentions.length > 0` 把「@ 了别人」也当成 @bot → 未点名也触发。
+      //   企微适配说明：企微 mentions 提取（extractWecomMentions）在有 botName 时
+      //   只收「@botName」的精确命中 → mentions 非空即 @bot，语义自洽；
+      //   未配 botName 的宽松形态（S5）经 index 侧 botOpenId 检查兜底（企微 botOpenId
+      //   为 undefined → 不算点名，宁过滤不误触发）。
+      const mentioned = botOpenId !== undefined && msg.mentions.includes(botOpenId);
       return mentioned;
     }
     case "keywords": {

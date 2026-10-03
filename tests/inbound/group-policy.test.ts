@@ -39,9 +39,9 @@ describe("shouldProcessGroupMessage", () => {
     expect(shouldProcessGroupMessage(msg({ mentions: ["ou_bot"] }), d as any)).toBe(true);
   });
 
-  it("mention：rawText 含 @botOpenId → 处理", () => {
+  it("★6c-1 M19：rawText 含 @botOpenId 但 mentions 为空 → 不处理（结构化 mentions 为准，文本字样不算点名；parser 会把 @bot 剥进 mentions）", () => {
     const d = deps({ policy: () => "mention" });
-    expect(shouldProcessGroupMessage(msg({ rawText: "@ou_bot 你好", mentions: [] }), d as any)).toBe(true);
+    expect(shouldProcessGroupMessage(msg({ rawText: "@ou_bot 你好", mentions: [] }), d as any)).toBe(false);
   });
 
   it("mention：未 @bot → 不处理", () => {

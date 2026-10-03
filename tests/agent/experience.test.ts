@@ -117,14 +117,15 @@ describe("experience.onTurnStart / onChunk / onThinking", () => {
 });
 
 describe("experience.onAssistantMessage", () => {
-  it("卡片存在 → 仅记录最终正文候选 + disarm，不 finalize（结果卡留 onTurnEnd）", async () => {
+  it("卡片存在 → 仅记录最终正文候选 + arm（★6c-1 G8 活动刷新模型：assistant 输出=活动，重新 arm；旧断言 disarm 属于已被替换的「首条 assistant 即解除监督」模型），不 finalize（结果卡留 onTurnEnd）", async () => {
     const { deps, ex, card } = setup();
     ex.onTurnStart("oc_1");
     await ex.onAssistantMessage("oc_1", "最终答案");
     // ★ 卡片改造：assistant/message 每 step 都有，不能再当收尾原地 finalize
     expect(card.finalize).not.toHaveBeenCalled();
     expect(card.finalizeToNewCard).not.toHaveBeenCalled();
-    expect(deps.turnSupervisor.disarm).toHaveBeenCalledWith("oc_1");
+    expect(deps.turnSupervisor.arm).toHaveBeenCalledWith("oc_1"); // ★6c-1 G8：arm 刷新而非 disarm
+    expect(deps.turnSupervisor.disarm).not.toHaveBeenCalled(); // 解除点唯一在 onTurnEnd
     expect(deps.sendText).not.toHaveBeenCalled();
     // 多 step：再来第二条 → 仍只记录候选，不重复发卡/覆盖
     await ex.onAssistantMessage("oc_1", "第二步答案");
@@ -146,7 +147,7 @@ describe("experience.onAssistantMessage", () => {
     await ex.onAssistantMessage("oc_1", "兜底完整回答");
     await ex.onTurnEnd("oc_1", "completed");
     expect(deps.sendText).toHaveBeenCalledWith("oc_1", "兜底完整回答");
-    expect(deps.turnSupervisor.disarm).toHaveBeenCalledWith("oc_1");
+    expect(deps.turnSupervisor.disarm).toHaveBeenCalledWith("oc_1"); // ★6c-1 G8：disarm 唯一在 onTurnEnd
   });
   it("空/空白/No response → 不发结果卡正文，但 G2 要求发收尾说明卡（不再静默不动作）", async () => {
     const { deps, ex, card } = setup();

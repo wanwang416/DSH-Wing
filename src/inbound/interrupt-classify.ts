@@ -19,8 +19,11 @@ export enum InterruptType {
 
 /** 停止词（精确匹配；含历史停止词 /stop/算了，兼容 P0-2 之前版本） */
 const STOP_WORDS_EXACT = new Set(["停", "停止", "stop", "/stop", "算了"]);
-/** 停止词（包含匹配，口语化） */
-const STOP_WORDS_INCLUDE = ["停下来", "停一下", "别说了", "别写了", "不要说了"];
+/** 停止词（口语化，★ M17：整句判定——只当 trim 后整句等于该词（或带轻尾语气字）才算，不用 includes）
+ *  旧实现 `t.includes("停下来")` 会把「别停在半路」「发动机不要说了没事」误杀成停止指令。 */
+const STOP_WORDS_PHRASE = ["停下来", "停一下", "别说了", "别写了", "不要说了"];
+/** 轻尾语气字（「停下来吧」「别写了呀」仍算停止；「停下来再说」这类带指令续句不算） */
+const STOP_TAIL_SOFT = new Set(["吧", "呀", "啊", "啦", "哦", "呢", "咯", "嘞", "了"]);
 /** 改道词（先停，再注入新指令） */
 const REDIRECT_WORDS = new Set(["换个话题", "重新来"]);
 
@@ -50,10 +53,10 @@ export function classifyInterrupt(text: string): InterruptType | null {
   const t = normalize(text);
   if (t === "") return null;
 
-  // 1. COMMAND：停止词（精确/包含）+ 改道词
+  // 1. COMMAND：停止词（精确 / ★M17 整句短语）+ 改道词
   if (
     STOP_WORDS_EXACT.has(t) ||
-    STOP_WORDS_INCLUDE.some((w) => t.includes(w)) ||
+    isStopPhrase(t) ||
     REDIRECT_WORDS.has(t)
   ) {
     return InterruptType.COMMAND;
@@ -80,6 +83,21 @@ export function classifyInterrupt(text: string): InterruptType | null {
 /** 是否改道词（COMMAND 子类：先 cancel，再 followup 注入新指令） */
 export function isRedirectWord(text: string): boolean {
   return REDIRECT_WORDS.has(normalize(text));
+}
+
+/** ★ M17（阶段6c-1）：口语化停止短语整句判定——整句 == 短语（或短语 + 轻尾语气字）。
+ *  判定方式说明：中文无词边界（\b 失效），改用「整句等值 + 轻尾容错」：
+ *  - 「停下来」「停下来吧」「别写了呀」→ true（真实停止指令）
+ *  - 「别停在半路」「先停下来再说」→ false（正常句子，交 agent/steer 处理） */
+export function isStopPhrase(t: string): boolean {
+  for (const w of STOP_WORDS_PHRASE) {
+    if (t === w) return true;
+    if (t.startsWith(w)) {
+      const rest = t.slice(w.length);
+      if (rest.length > 0 && [...rest].every((c) => STOP_TAIL_SOFT.has(c))) return true;
+    }
+  }
+  return false;
 }
 
 /** 是否推进词（ORDINARY 子类：需要 followup 注入，不能只回执） */

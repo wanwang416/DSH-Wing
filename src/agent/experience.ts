@@ -13,7 +13,7 @@
 import type { WingConfig } from "../config/defaults.js";
 import { StreamingCard, type StreamCardHandle } from "../outbound/streaming-card.js";
 import { describeError } from "../outbound/outbox.js";
-import { classifyInterrupt, InterruptType, isForwardWord, isRedirectWord } from "../inbound/interrupt-classify.js";
+import { classifyInterrupt, InterruptType, isForwardWord, isRedirectWord, isStopPhrase } from "../inbound/interrupt-classify.js";
 import { appendFileSync } from "node:fs";
 
 export interface TurnSupervisorLike {
@@ -141,19 +141,28 @@ export function createExperience(deps: ExperienceDeps) {
       const s = st(chatId);
       s.hasOutput = true;
       s.latestAnswer = text;
-      deps.turnSupervisor.disarm(chatId);
+      // ★ G8（阶段6c-1）：assistant 输出是「活动」——刷新监督（重新 arm）而非解除（disarm）。
+      //   旧实现在首条 assistant 即 disarm：①turn 后续步骤/工具挂死 → 无人监管，会话永久卡住；
+      //   ②监督语义退化为「只管首响应延迟」。改为活动刷新模型：任何活动事件（chunk/thinking/
+      //   assistant/tool）都重新 arm；仅 turn 结束才 disarm。挂死判定 = 无活动持续超过 timeoutMs。
+      deps.turnSupervisor.arm(chatId);
       // 不再在此发结果卡 / 降级 text —— 统一到 onTurnEnd（避免每 step 重复推送）
     },
 
     /** tool/call：Tools 面板新增一行（🔧 <工具名>，带参数摘要） */
     async onToolCall(chatId: string, name: string, input?: string): Promise<void> {
       const s = st(chatId);
+      // ★ G8（阶段6c-1）：工具活动刷新监督——长工具执行（重 io/长请求）期间持续 arm，
+      //   不再被「turn start 后 N 分钟无 assistant」的旧规则误杀（上下文错乱的根因）。
+      deps.turnSupervisor.arm(chatId);
       await s.card?.addTool(name, input).catch(() => void 0);
     },
 
     /** tool/result：更新对应工具行状态（✅/❌ + 结果摘要） */
     async onToolResult(chatId: string, name: string, error: unknown): Promise<void> {
       const s = st(chatId);
+      // ★ G8（阶段6c-1）：工具结果同样是「活动」——刷新监督
+      deps.turnSupervisor.arm(chatId);
       await s.card?.setToolResult(name, error).catch(() => void 0);
     },
 
@@ -180,6 +189,7 @@ export function createExperience(deps: ExperienceDeps) {
     /** turn/end：判定真正结束 → 发独立「结果卡」；失败/无产出 → 警告+表情 */
     async onTurnEnd(chatId: string, reason: string): Promise<void> {
       const s = st(chatId);
+      deps.turnSupervisor.disarm(chatId); // ★ G8（阶段6c-1）：唯一解除点——turn 结束才解除监督（活动刷新模型）
       const cardAtEnd = s.card; // ★ M7：本轮卡引用快照（state 对象会被新轮次复用，不可作身份）
       const finalAnswer = s.latestAnswer?.trim();
       if (reason === "completed" && finalAnswer && finalAnswer !== "No response.") {
@@ -266,13 +276,8 @@ export function createExperience(deps: ExperienceDeps) {
           t === "停止" ||
           t === "stop" ||
           t === "/stop" ||
-          t === "/stop".toLowerCase() ||
-          t.includes("停下来") ||
-          t.includes("停一下") ||
-          t.includes("别说了") ||
-          t.includes("别写了") ||
-          t.includes("不要说了") ||
-          t === "算了";
+          t === "算了" ||
+          isStopPhrase(t); // ★ M17（阶段6c-1）：整句短语判定（旧 includes 子串会误杀正常句子）
         if (isStop) {
           agent.cancel({ kind: "user" });
           diagLog(`[steer-diag] STOP 分支: text="${text.slice(0, 30)}" status=${agent.status}`);

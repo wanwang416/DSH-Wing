@@ -618,8 +618,13 @@ export function apply(ctx: any, rawConfig: unknown): void {
       // ★ P1-3 意图桥：群聊纯寒暄不触发 agent（未明确 @bot → 打 reaction + 消费 WAL，不建 session）
       // p2p 永远不过滤（用户单独找 bot 必须有响应）；@bot 命中 = 用户明确点名，也不过滤
       if (msg.chatType === "group") {
-        // 「点名」判定：@ 了任何人（含 @bot）→ 用户明确想引起注意，不过滤（保守防误吞）
-        const mentionedBot = msg.mentions.length > 0 || msg.rawText.includes("@");
+        // 「点名」判定 ★ M19（阶段6c-1）收窄：只认「确实 @ 到机器人本人」。
+        //   旧实现 `mentions.length > 0 || rawText.includes("@")` 把 @ 同事/任何 @ 字样
+        //   都当成 @bot → 没点名的消息也触发 agent（与 G5 同类问题的另一面）。
+        //   fail-closed 口径：拿不到 botOpenId → 不算点名（宁过滤不误触发；
+        //   p2p 不走此分支不受影响，关键词策略群也不受影响）。
+        const botId = transport.botOpenId();
+        const mentionedBot = botId !== undefined && msg.mentions.includes(botId);
         const intent = classifyIntent(msg.text);
         // 诊断日志：寒暄消息无论是否放行都留痕（验收遗留——「你好」直通疑点需观察 mentions）
         if (intent === Intent.CHITCHAT) {
@@ -774,6 +779,15 @@ export function apply(ctx: any, rawConfig: unknown): void {
       //   chatTypeOf 仅作无真值时的兜底。
       const text = batching.merge(items);
       const last = items[items.length - 1];
+      // ★ G7（阶段6c-1）：合批成员 messageId 逐条登记去重——旧实现只有 last.messageId
+      //   随合并事件进去重表，前 N-1 条成员被平台 WS 重投时被当新消息 → 同一句话重复执行。
+      //   登记发生在「决定处理」（flush 投递）时，与 M22「先解析后去重」原则一致：
+      //   合批中的消息尚未决定处理，不占位（重投会再次进 add 合批，不会丢）。
+      //   ★ 批尾 id 豁免：合并事件 message_id = last.messageId，马上要过 dispatcher 去重闸——
+      //     这里若连它一起 add，合并事件会被 isDuplicate 拦掉，整批丢失（4 条集成测试红的根因，
+      //     probe 复现证实）。批尾 id 的去重位由 dispatcher.handleEvent 自己占（首过闸时 add），
+      //     重投 last.messageId 同样被拦（dispatcher 已占位）→ G7 防重投目标不变。
+      for (const item of items.slice(0, -1)) dedupe.add(item.messageId);
       void dispatcher.handleEvent("im.message.receive_v1", {
         message: {
           message_id: last.messageId,
@@ -803,8 +817,12 @@ export function apply(ctx: any, rawConfig: unknown): void {
       // （合批只为群聊设计：群聊里用户连续发多条短消息应合并；p2p 插话不能被吞）
       // ★ M4-R3 任务 4：携带事件层真实 chatType，合批 flush 透传（不再用前缀猜测）
       // ★ P1-3：@bot 消息跳过合批——点名应即时响应；也避免合批丢 mentions 导致意图桥误过滤
+      // ★ M19（阶段6c-1）口径统一：与 handleInbound 意图桥同款判定（botOpenId 精确命中 mentions）。
+      //   旧口径 `rawText.includes(@botNow)` 是字符串包含（@botOpenId2 会误中 @botOpenId 前缀），
+      //   且与意图桥两套口径并存——同一消息两处判定结果可能相反（本批要治的病）。
+      //   影响面核查：全仓 rawText.includes(@) 仅此一处 + 意图桥（均已收窄），无其他依赖。
       const botNow = transport.botOpenId();
-      const mentionedBot = msg.mentions.includes(botNow ?? "") || (botNow ? msg.rawText.includes(`@${botNow}`) : false);
+      const mentionedBot = botNow !== undefined && msg.mentions.includes(botNow);
       if (msg.chatType === "group" && !mentionedBot && batching.add(msg.chatId, { messageId: msg.messageId, text: msg.text, chatType: msg.chatType })) {
         return; // 群聊已合并（窗口到期统一 flush）
       }
